@@ -1,9 +1,41 @@
 import { startOfWeek, isAfter, format } from 'date-fns';
 import { useUserDoc } from './storage';
 
-/** The study log: [{ subject, minutes, at }] where `at` is an ISO timestamp. */
+/**
+ * The study log: [{ id, subject, minutes, at }] where `at` is an ISO timestamp.
+ *
+ * `id` was added so a mis-logged session can be taken back out again by
+ * identity. Entries written before that exist without one, so every lookup
+ * falls back to matching on the other three fields.
+ */
 export function useStudyLog() {
   return useUserDoc('studylog', []);
+}
+
+export function newEntryId() {
+  try {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  } catch { /* older browsers */ }
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+const sameEntry = (a, b) =>
+  (a.id && b.id)
+    ? a.id === b.id
+    : a.at === b.at && a.subject === b.subject && Number(a.minutes) === Number(b.minutes);
+
+/** The log without `entry`. Removes one occurrence, never all of them. */
+export function removeEntry(log, entry) {
+  const i = log.findIndex((e) => sameEntry(e, entry));
+  return i === -1 ? log : [...log.slice(0, i), ...log.slice(i + 1)];
+}
+
+/** Today's sessions, newest first, so a wrong one is easy to find and undo. */
+export function entriesToday(log) {
+  const today = format(new Date(), 'yyyy-MM-dd');
+  return log
+    .filter((s) => String(s.at).slice(0, 10) === today)
+    .sort((a, b) => String(b.at).localeCompare(String(a.at)));
 }
 
 export function weekMinutes(log) {

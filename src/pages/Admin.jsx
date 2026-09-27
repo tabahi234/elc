@@ -3,8 +3,8 @@ import { collection, deleteDoc, doc, onSnapshot, serverTimestamp, setDoc } from 
 import { format, parse } from 'date-fns';
 import {
   Plus, Pencil, Trash2, Megaphone, BookOpen, CalendarDays, Users,
-  ExternalLink, Link2, ShieldCheck, Info, MapPin, Sparkles, Clock,
-  ClipboardCheck, CalendarOff, CheckCheck, Check, X, CalendarRange, AlertCircle,
+  ExternalLink, Link2, ShieldCheck, Info, MapPin, Sparkles, Clock, CalendarClock,
+  Share2, CalendarX2, CalendarPlus, ArrowRightLeft, Copy, Ban,
 } from 'lucide-react';
 import { db } from '../firebase';
 import { useAuth } from '../lib/authContext';
@@ -13,8 +13,16 @@ import { useToast } from '../lib/toastContext';
 import { Field, Sheet, ConfirmButton, EmptyState, Tabs } from '../components/ui';
 import {
   LIMITS, TASK_TYPES, SLOT_TYPES, clean, hasErrors, todayIso, toMinutes,
-  vTask, vSubject, vSubjectCode, vSlot, vSession, dueDateHint, safeLink, daysFromToday,
+  vTask, vSubject, vSubjectCode, vSlot, vClassChange, vAnnouncement,
+  dueDateHint, safeLink, daysFromToday,
 } from '../lib/validate';
+import { friendlyError } from '../lib/errors';
+import { classesOn, upcomingChanges, describeChange, changeIsPast } from '../lib/schedule';
+import { isLive } from '../lib/announcements';
+import {
+  shareText, shareSupported,
+  deadlineShareText, announcementShareText, changeShareText,
+} from '../lib/share';
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 // Harmonised categorical set: every hue sits at roughly the same saturation
@@ -23,17 +31,42 @@ const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 
 const PALETTE = ['#5b93ce', '#45a79f', '#4fa87b', '#88a852', '#cfa153', '#cf7f63', '#ce6e8e', '#9a7fce'];
 
 const prettyTime = (t) => (t ? format(parse(t, 'HH:mm', new Date()), 'h:mm a') : '');
+const prettyDate = (iso) => format(new Date(`${iso}T00:00:00`), 'EEE d MMM');
+
+/**
+ * Push something into the class group chat.
+ *
+ * The CR has just typed this out once. Retyping it in WhatsApp is where the
+ * wording drifts, the date gets transposed, and half the class ends up working
+ * from a different deadline to the other half.
+ */
+function ShareButton({ text, label }) {
+  const toast = useToast();
+
+  const go = async () => {
+    const result = await shareText(text);
+    if (result === 'copied') toast.success('Copied. Paste it into the class group.');
+    else if (result === 'failed') toast.error('Could not share or copy that. Select the text and copy it by hand.');
+    // 'shared' needs no toast: the share sheet was the feedback.
+  };
+
+  return (
+    <button className="btn-icon btn-icon-sm" onClick={go} aria-label={label} title={label}>
+      {shareSupported() ? <Share2 size={15} aria-hidden="true" /> : <Copy size={15} aria-hidden="true" />}
+    </button>
+  );
+}
 
 /** Turns whatever the write helper returned into the right toast. */
 function useCommitToast() {
   const toast = useToast();
   return (result, successMessage) => {
     if (!result || result.ok === false) {
-      // Firestore never says which rule failed, so the next best thing is to
+      // The server never says which check failed, so the next best thing is to
       // name the handful of things that actually cause this in practice.
       const message = result?.error?.code === 'permission-denied'
-        ? 'Firestore refused that write. Usual causes: the subject it points at does not exist yet, a link is not on drive.google.com or classroom.google.com, or your role was changed.'
-        : result?.error?.message || 'Something went wrong.';
+        ? 'That was refused. Check the subject still exists, that any link is a Google Drive or Classroom address, and that you still have manage access.'
+        : friendlyError(result?.error);
       toast.error(message);
       return false;
     }
@@ -57,10 +90,10 @@ export default function Admin() {
   };
 
   const tabs = [
-    { value: 'deadlines', label: 'Deadlines', icon: Megaphone },
+    { value: 'deadlines', label: 'Deadlines', icon: CalendarClock },
+    { value: 'notices', label: 'Notices', icon: Megaphone },
     { value: 'subjects', label: 'Subjects', icon: BookOpen },
     { value: 'timetable', label: 'Timetable', icon: CalendarDays },
-    { value: 'sessions', label: 'Register', icon: ClipboardCheck },
     ...(isAdmin ? [{ value: 'people', label: 'People', icon: Users }] : []),
   ];
 
@@ -95,9 +128,9 @@ export default function Admin() {
 
       <div style={{ marginTop: 'var(--s4)' }}>
         {tab === 'deadlines' && <DeadlinesTab />}
+        {tab === 'notices' && <NoticesTab />}
         {tab === 'subjects' && <SubjectsTab />}
         {tab === 'timetable' && <TimetableTab />}
-        {tab === 'sessions' && <SessionsTab />}
         {tab === 'people' && isAdmin && <PeopleTab />}
       </div>
     </div>
@@ -116,8 +149,10 @@ function DeadlinesTab() {
   const report = useCommitToast();
   const [editing, setEditing] = useState(null);
 
-  const upcoming = globalTasks.filter((t) => t.dueDate >= todayIso());
-  const past = globalTasks.filter((t) => t.dueDate < todayIso()).reverse();
+  // A deadline whose date has not been announced yet is still ahead of the
+  // class, not behind it, so it belongs at the top of Upcoming.
+  const upcoming = globalTasks.filter((t) => !t.dueDate || t.dueDate >= todayIso());
+  const past = globalTasks.filter((t) => t.dueDate && t.dueDate < todayIso()).reverse();
 
   const remove = async (task) => {
     report(await deleteGlobalTask(task.id), `Removed "${task.title}".`);
@@ -201,14 +236,23 @@ function TaskRow({ task, subjects, onEdit, onDelete }) {
         <div className="muted tiny row-wrap" style={{ marginTop: 4 }}>
           <span className="badge">{task.type}</span>
           <span>{subject?.short || task.subject}</span>
-          <span className="dot-sep" />
-          <span className="nums">
-            {format(new Date(`${task.dueDate}T00:00:00`), 'EEE, MMM d')}
-            {task.dueTime ? ` · ${prettyTime(task.dueTime)}` : ''}
-          </span>
+          {task.dueDate ? (
+            <span className="nums">
+              {format(new Date(`${task.dueDate}T00:00:00`), 'EEE, MMM d')}
+              {task.dueTime ? ` · ${prettyTime(task.dueTime)}` : ''}
+            </span>
+          ) : (
+            <span className="badge badge-warning">
+              <CalendarClock size={10} aria-hidden="true" /> Date not announced yet
+            </span>
+          )}
         </div>
         {task.note && <p className="muted small" style={{ marginTop: 6 }}>{task.note}</p>}
       </div>
+      <ShareButton
+        text={deadlineShareText(task, subjects)}
+        label={`Share "${task.title}" with the class group`}
+      />
       <button className="btn-icon btn-icon-sm" onClick={() => onEdit(task)} aria-label={`Edit ${task.title}`}>
         <Pencil size={15} aria-hidden="true" />
       </button>
@@ -223,7 +267,10 @@ function TaskSheet({ task, subjects, onClose, onSave }) {
   const [form, setForm] = useState(task);
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
-  const errors = vTask(form);
+  // The date is optional on purpose: a teacher often announces an assignment
+  // weeks before fixing when it is actually due, and the class needs to know
+  // about it from the moment it is mentioned.
+  const errors = vTask(form, { requireDueDate: false });
   const show = (key) => (touched ? errors[key] : undefined);
 
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
@@ -237,7 +284,7 @@ function TaskSheet({ task, subjects, onClose, onSave }) {
       title: clean(form.title),
       subject: form.subject,
       type: form.type,
-      dueDate: form.dueDate,
+      dueDate: form.dueDate || null,
       dueTime: form.dueTime || '',
       note: clean(form.note),
     });
@@ -287,13 +334,24 @@ function TaskSheet({ task, subjects, onClose, onSave }) {
         </div>
 
         <div className="field-grid">
-          <Field label="Due date" required error={show('dueDate')} hint={dueDateHint(form.dueDate)}>
+          <Field
+            label="Due date" error={show('dueDate')}
+            hint={dueDateHint(form.dueDate) || 'Leave empty if it has not been announced.'}
+          >
             <input type="date" value={form.dueDate} onChange={set('dueDate')} onBlur={() => setTouched(true)} />
           </Field>
           <Field label="Due time" error={show('dueTime')} hint="Optional, for a submission cut-off.">
             <input type="time" value={form.dueTime} onChange={set('dueTime')} />
           </Field>
         </div>
+
+        {!form.dueDate && (
+          <p className="field-hint row" style={{ alignItems: 'flex-start', gap: 6, marginTop: -4 }}>
+            <CalendarClock size={13} aria-hidden="true" style={{ marginTop: 2, flexShrink: 0 }} />
+            With no date, the class sees this as &ldquo;Date not announced yet&rdquo; and gets no
+            countdown or reminder. Come back and add the date once you have it.
+          </p>
+        )}
 
         <Field
           label="Note" error={show('note')}
@@ -305,6 +363,224 @@ function TaskSheet({ task, subjects, onClose, onSave }) {
       </form>
     </Sheet>
   );
+}
+
+/* ══ Notices ═════════════════════════════════════════════════════════════════ */
+
+/**
+ * Everything the class needs to hear that is not a deadline: bring a
+ * calculator, the lab report format changed, Friday's class is in the other
+ * block. This is the stuff that currently scrolls away in a WhatsApp group
+ * twenty minutes after it is posted.
+ *
+ * Every notice carries an expiry date, and the form pushes hard for one. A
+ * board nobody clears becomes wallpaper, and then the notice that actually
+ * matters gets read as wallpaper too.
+ */
+const blankAnnouncement = () => ({ title: '', body: '', until: '' });
+
+function NoticesTab() {
+  const { announcements, saveAnnouncement, deleteAnnouncement } = useClassData();
+  const report = useCommitToast();
+  const [editing, setEditing] = useState(null);
+
+  const live = announcements.filter(isLive);
+  const expired = announcements.filter((a) => !isLive(a));
+
+  const remove = async (announcement) => {
+    report(await deleteAnnouncement(announcement.id), 'Notice taken down.');
+  };
+
+  return (
+    <div className="stack">
+      <button className="btn btn-primary btn-block" onClick={() => setEditing(blankAnnouncement())}>
+        <Plus size={18} aria-hidden="true" /> Post a notice
+      </button>
+
+      <section className="section" style={{ marginTop: 'var(--s2)' }}>
+        <div className="section-head">
+          <h2 className="section-title">Showing now</h2>
+          <span className="muted small">{live.length}</span>
+        </div>
+        {live.length === 0 ? (
+          <div className="card">
+            <EmptyState icon={Megaphone} title="Nothing posted">
+              Anything you post here sits on every classmate&rsquo;s dashboard until the
+              date you set. Use it for what does not belong on a deadline.
+            </EmptyState>
+          </div>
+        ) : (
+          <div className="stack-sm">
+            {live.map((a) => (
+              <NoticeRow key={a.id} announcement={a} onEdit={setEditing} onDelete={remove} />
+            ))}
+          </div>
+        )}
+      </section>
+
+      {expired.length > 0 && (
+        <details className="card card-tight">
+          <summary className="muted small" style={{ cursor: 'pointer' }}>
+            Expired notices ({expired.length})
+          </summary>
+          <p className="field-hint" style={{ margin: 'var(--s2) 0 var(--s3)' }}>
+            Nobody sees these any more. Delete them, or change the date to put one back up.
+          </p>
+          <div className="stack-sm">
+            {expired.map((a) => (
+              <NoticeRow key={a.id} announcement={a} onEdit={setEditing} onDelete={remove} expired />
+            ))}
+          </div>
+        </details>
+      )}
+
+      {editing && (
+        <NoticeSheet
+          announcement={editing}
+          onClose={() => setEditing(null)}
+          onSave={async (data) => {
+            const isEdit = Boolean(editing.id);
+            const payload = isEdit
+              ? { ...data, createdAt: editing.createdAt, createdBy: editing.createdBy }
+              : data;
+            const ok = report(
+              await saveAnnouncement(editing.id ?? null, payload),
+              isEdit ? 'Notice updated.' : 'Notice posted to the class.'
+            );
+            if (ok) setEditing(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function NoticeRow({ announcement, onEdit, onDelete, expired }) {
+  const left = announcement.until ? daysFromToday(announcement.until) : null;
+
+  return (
+    <div className="card card-tight row" style={{ alignItems: 'flex-start', opacity: expired ? 0.6 : 1 }}>
+      <div className="grow" style={{ minWidth: 0 }}>
+        <div style={{ fontWeight: 650 }}>{announcement.title}</div>
+        {announcement.body && (
+          <p className="muted small" style={{ marginTop: 4 }}>{announcement.body}</p>
+        )}
+        <div className="muted tiny row-wrap" style={{ marginTop: 6 }}>
+          {announcement.until ? (
+            <span className={`badge ${!expired && left <= 1 ? 'badge-warning' : ''}`}>
+              {expired ? `Ended ${prettyDate(announcement.until)}`
+                : left === 0 ? 'Last day today'
+                : left === 1 ? 'Until tomorrow'
+                : `Until ${prettyDate(announcement.until)}`}
+            </span>
+          ) : (
+            <span className="badge">No end date</span>
+          )}
+        </div>
+      </div>
+      <ShareButton
+        text={announcementShareText(announcement)}
+        label={`Share "${announcement.title}" with the class group`}
+      />
+      <button
+        className="btn-icon btn-icon-sm"
+        onClick={() => onEdit(announcement)}
+        aria-label={`Edit ${announcement.title}`}
+      >
+        <Pencil size={15} aria-hidden="true" />
+      </button>
+      <ConfirmButton onConfirm={() => onDelete(announcement)} label={`Delete ${announcement.title}`}>
+        <Trash2 size={15} aria-hidden="true" />
+      </ConfirmButton>
+    </div>
+  );
+}
+
+function NoticeSheet({ announcement, onClose, onSave }) {
+  const [form, setForm] = useState(announcement);
+  const [touched, setTouched] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const errors = vAnnouncement(form);
+  const show = (key) => (touched ? errors[key] : undefined);
+  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setTouched(true);
+    if (hasErrors(errors)) return;
+    setSaving(true);
+    await onSave({
+      title: clean(form.title),
+      body: clean(form.body),
+      until: form.until || '',
+    });
+    setSaving(false);
+  };
+
+  return (
+    <Sheet
+      open
+      onClose={onClose}
+      title={announcement.id ? 'Edit notice' : 'Post a notice'}
+      subtitle="Sits on every classmate's dashboard until it expires."
+      footer={
+        <>
+          <button className="btn btn-secondary" onClick={onClose} type="button">Cancel</button>
+          <button className="btn btn-primary" onClick={submit} disabled={saving} type="button">
+            {saving ? 'Saving…' : announcement.id ? 'Save changes' : 'Post it'}
+          </button>
+        </>
+      }
+    >
+      <form className="stack" onSubmit={submit}>
+        <Field
+          label="What do they need to know" required error={show('title')}
+          hint="One sentence. This is the part they will actually read."
+          counter={{ value: clean(form.title).length, max: 120 }}
+        >
+          <input
+            value={form.title} onChange={set('title')} onBlur={() => setTouched(true)}
+            placeholder="Bring your own calculator to Wednesday's lab"
+            maxLength={120}
+          />
+        </Field>
+
+        <Field
+          label="Details" error={show('body')}
+          hint="Optional. Anything that does not fit in the line above."
+          counter={{ value: clean(form.body).length, max: LIMITS.note.max }}
+        >
+          <textarea value={form.body} onChange={set('body')} maxLength={LIMITS.note.max} rows={3} />
+        </Field>
+
+        <Field
+          label="Take it down after" error={show('until')}
+          hint={untilHint(form.until)}
+        >
+          <input type="date" value={form.until} onChange={set('until')} min={todayIso()} />
+        </Field>
+
+        {!form.until && (
+          <p className="field-hint row" style={{ alignItems: 'flex-start', gap: 6, marginTop: -4 }}>
+            <Info size={13} aria-hidden="true" style={{ marginTop: 2, flexShrink: 0 }} />
+            With no date this stays up until you delete it. A dashboard of notices
+            nobody cleared stops being read, including the one that matters, so set
+            a date whenever you can.
+          </p>
+        )}
+      </form>
+    </Sheet>
+  );
+}
+
+function untilHint(until) {
+  if (!until) return 'Optional, but strongly recommended.';
+  const left = daysFromToday(until);
+  if (left === 0) return 'Shows today, then disappears by itself.';
+  if (left === 1) return 'Shows today and tomorrow.';
+  if (left > 0) return `Shows for the next ${left} days, then disappears by itself.`;
+  return null;
 }
 
 /* ══ Subjects & links ════════════════════════════════════════════════════════ */
@@ -563,7 +839,22 @@ function TimetableTab() {
 
   return (
     <div className="stack">
-      <button className="btn btn-primary btn-block" onClick={() => setEditing(blankSlot(subjects))}>
+      {/* One-off changes come first because they are the thing a CR opens this
+          tab to do on any given week. The recurring pattern below it changes
+          maybe twice a semester. */}
+      <ChangesSection />
+
+      <hr className="divider" style={{ marginTop: 'var(--s3)' }} />
+
+      <div className="section-head" style={{ marginTop: 'var(--s2)' }}>
+        <h2 className="section-title">The weekly pattern</h2>
+      </div>
+      <p className="field-hint" style={{ marginTop: -8 }}>
+        What normally happens, every week. Change this only when the timetable
+        itself changes, not for a single cancelled class.
+      </p>
+
+      <button className="btn btn-secondary btn-block" onClick={() => setEditing(blankSlot(subjects))}>
         <Plus size={18} aria-hidden="true" /> Add a class slot
       </button>
 
@@ -751,6 +1042,374 @@ function SlotSheet({ slot, subjects, others, onClose, onSave }) {
   );
 }
 
+/* ══ One-off class changes ═══════════════════════════════════════════════════ */
+
+/**
+ * The timetable says what normally happens. This says what happens instead, on
+ * one named date.
+ *
+ * It is the most expensive thing the app could not previously tell anyone: a
+ * student commutes in, sits for an hour, and the class was never on. A rolling
+ * "room changed" note on the recurring slot cannot express it, because the
+ * change belongs to a date, not to every Wednesday from now on.
+ */
+const CHANGE_KINDS = [
+  { value: 'cancelled', label: 'Cancelled', icon: Ban, blurb: 'It is not happening that day.' },
+  { value: 'moved', label: 'Moved', icon: ArrowRightLeft, blurb: 'Same class, different time or room.' },
+  { value: 'extra', label: 'Extra class', icon: CalendarPlus, blurb: 'A make-up or additional session.' },
+];
+
+const blankChange = (subjects) => ({
+  status: 'cancelled',
+  date: todayIso(),
+  slotId: '',
+  code: Object.keys(subjects)[0] || '',
+  start: '', end: '', room: '', type: 'Lecture',
+  note: '',
+});
+
+function ChangesSection() {
+  const {
+    subjects, timetable, classChanges, saveClassChange, deleteClassChange, usingDefaults,
+  } = useClassData();
+  const report = useCommitToast();
+  const [editing, setEditing] = useState(null);
+
+  const upcoming = upcomingChanges(classChanges, 45);
+  const past = classChanges.filter(changeIsPast).reverse();
+
+  const remove = async (change) => {
+    report(await deleteClassChange(change.id), 'Change removed. The class is back to normal.');
+  };
+
+  return (
+    <>
+      <div className="section-head" style={{ marginBottom: 0 }}>
+        <h2 className="section-title">This week and beyond</h2>
+      </div>
+      <p className="field-hint" style={{ marginTop: -4 }}>
+        Cancel a class, move it, or add an extra one, for a single date. It shows on
+        everyone&rsquo;s dashboard from the moment you save it and clears itself once
+        the date passes.
+      </p>
+
+      <button
+        className="btn btn-primary btn-block"
+        onClick={() => setEditing(blankChange(subjects))}
+        disabled={usingDefaults || timetable.length === 0}
+      >
+        <CalendarX2 size={18} aria-hidden="true" /> Change a single class
+      </button>
+
+      {upcoming.length === 0 ? (
+        <div className="card">
+          <EmptyState icon={CalendarDays} title="Nothing changed">
+            Every class is running as timetabled.
+          </EmptyState>
+        </div>
+      ) : (
+        <div className="stack-sm">
+          {upcoming.map((change) => (
+            <ChangeRow
+              key={change.id}
+              change={change}
+              subjects={subjects}
+              timetable={timetable}
+              onEdit={setEditing}
+              onDelete={remove}
+            />
+          ))}
+        </div>
+      )}
+
+      {past.length > 0 && (
+        <details className="card card-tight">
+          <summary className="muted small" style={{ cursor: 'pointer' }}>
+            Changes that have passed ({past.length})
+          </summary>
+          <p className="field-hint" style={{ margin: 'var(--s2) 0 var(--s3)' }}>
+            Nobody sees these. Deleting them keeps this list readable.
+          </p>
+          <div className="stack-sm">
+            {past.slice(0, 20).map((change) => (
+              <ChangeRow
+                key={change.id}
+                change={change}
+                subjects={subjects}
+                timetable={timetable}
+                onEdit={setEditing}
+                onDelete={remove}
+                past
+              />
+            ))}
+          </div>
+        </details>
+      )}
+
+      {editing && (
+        <ChangeSheet
+          change={editing}
+          subjects={subjects}
+          timetable={timetable}
+          existing={classChanges}
+          onClose={() => setEditing(null)}
+          onSave={async (data) => {
+            const ok = report(
+              await saveClassChange(editing.id ?? null, data),
+              'The class has been told.'
+            );
+            if (ok) setEditing(null);
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+function ChangeRow({ change, subjects, timetable, onEdit, onDelete, past }) {
+  const { headline, detail, tone } = describeChange(change, subjects, timetable);
+  const away = daysFromToday(change.date);
+
+  return (
+    <div
+      className="card card-tight card-accent row"
+      style={{ '--stripe': subjects[change.code]?.color, alignItems: 'flex-start', opacity: past ? 0.6 : 1 }}
+    >
+      <div className="grow" style={{ minWidth: 0 }}>
+        <div style={{ fontWeight: 600 }}>{headline}</div>
+        {detail && <div className="muted tiny" style={{ marginTop: 3 }}>{detail}</div>}
+        {change.note && <p className="muted small" style={{ marginTop: 5 }}>{change.note}</p>}
+        <div className="row-wrap" style={{ marginTop: 6 }}>
+          <span className={`badge badge-${tone}`}>
+            {change.status === 'cancelled' ? 'Cancelled'
+              : change.status === 'moved' ? 'Moved' : 'Extra class'}
+          </span>
+          {!past && (
+            <span className="badge">
+              {away === 0 ? 'Today' : away === 1 ? 'Tomorrow' : `In ${away} days`}
+            </span>
+          )}
+        </div>
+      </div>
+      <ShareButton
+        text={changeShareText(change, subjects, timetable)}
+        label="Share this change with the class group"
+      />
+      <button className="btn-icon btn-icon-sm" onClick={() => onEdit(change)} aria-label="Edit this change">
+        <Pencil size={15} aria-hidden="true" />
+      </button>
+      <ConfirmButton onConfirm={() => onDelete(change)} label="Delete this change">
+        <Trash2 size={15} aria-hidden="true" />
+      </ConfirmButton>
+    </div>
+  );
+}
+
+function ChangeSheet({ change, subjects, timetable, existing, onClose, onSave }) {
+  const [form, setForm] = useState(change);
+  const [touched, setTouched] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  // Which classes are on that day, so a cancellation picks from reality rather
+  // than from a free-text field the CR has to get right from memory.
+  const scheduled = useMemo(
+    () => (form.date ? classesOn(form.date, timetable, []) : []),
+    [form.date, timetable]
+  );
+
+  const errors = vClassChange({ ...form, id: change.id }, existing);
+  const show = (key) => (touched ? errors[key] : undefined);
+  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+
+  const needsSlot = form.status === 'cancelled' || form.status === 'moved';
+  const needsTime = form.status === 'moved' || form.status === 'extra';
+
+  /**
+   * Switching kind rewrites the fields that kind needs, because carrying a
+   * half-filled "moved" over to "cancelled" is how a slotId ends up attached to
+   * an extra class that has no slot.
+   */
+  const chooseKind = (status) => setForm((f) => {
+    if (status === 'extra') {
+      return { ...f, status, slotId: '', start: f.start || '', end: f.end || '', room: f.room || '' };
+    }
+    if (status === 'cancelled') return { ...f, status };
+    return { ...f, status };
+  });
+
+  /** Picking the class to change prefills everything from the real slot. */
+  const chooseSlot = (slotId) => setForm((f) => {
+    const slot = scheduled.find((s) => s.id === slotId);
+    if (!slot) return { ...f, slotId };
+    return {
+      ...f,
+      slotId,
+      code: slot.code,
+      start: f.status === 'moved' ? slot.start : f.start,
+      end: f.status === 'moved' ? slot.end : f.end,
+      room: f.status === 'moved' ? slot.room : f.room,
+      type: slot.type,
+    };
+  });
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setTouched(true);
+    if (hasErrors(errors)) return;
+    setSaving(true);
+    // A cancelled class has no replacement time or place, and the rules reject
+    // one that pretends otherwise.
+    const blank = form.status === 'cancelled';
+    await onSave({
+      date: form.date,
+      slotId: form.status === 'extra' ? null : form.slotId,
+      code: form.code,
+      status: form.status,
+      start: blank ? '' : form.start,
+      end: blank ? '' : form.end,
+      room: blank ? '' : clean(form.room),
+      type: blank ? '' : form.type,
+      note: clean(form.note),
+    });
+    setSaving(false);
+  };
+
+  const kind = CHANGE_KINDS.find((k) => k.value === form.status);
+
+  return (
+    <Sheet
+      open
+      onClose={onClose}
+      title={change.id ? 'Edit this change' : 'Change a single class'}
+      subtitle="For one date only. The weekly timetable stays as it is."
+      footer={
+        <>
+          <button className="btn btn-secondary" onClick={onClose} type="button">Cancel</button>
+          <button className="btn btn-primary" onClick={submit} disabled={saving} type="button">
+            {saving ? 'Saving…' : change.id ? 'Save changes' : 'Tell the class'}
+          </button>
+        </>
+      }
+    >
+      <form className="stack" onSubmit={submit}>
+        <div>
+          <p className="field-label" style={{ marginBottom: 8 }}>What is happening</p>
+          <div className="tabs" role="group" aria-label="Kind of change">
+            {CHANGE_KINDS.map(({ value, label, icon: Icon }) => (
+              <button
+                key={value} type="button" role="tab"
+                aria-selected={form.status === value}
+                onClick={() => chooseKind(value)}
+              >
+                <Icon size={14} aria-hidden="true" />{label}
+              </button>
+            ))}
+          </div>
+          <p className="field-hint" style={{ marginTop: 6 }}>{kind?.blurb}</p>
+        </div>
+
+        <Field
+          label="Which date" required error={show('date')}
+          hint={dateHint(form.date)}
+        >
+          <input
+            type="date" value={form.date} min={todayIso()}
+            onChange={(e) => setForm((f) => ({ ...f, date: e.target.value, slotId: '' }))}
+            onBlur={() => setTouched(true)}
+          />
+        </Field>
+
+        {needsSlot && (
+          <Field
+            label="Which class" required error={show('slotId')}
+            hint={scheduled.length === 0 ? undefined : 'Only the classes timetabled for that day.'}
+          >
+            <select value={form.slotId} onChange={(e) => chooseSlot(e.target.value)}>
+              <option value="">Pick one…</option>
+              {scheduled.map((slot) => (
+                <option key={slot.id} value={slot.id}>
+                  {subjects[slot.code]?.short || slot.code} · {prettyTime(slot.start)} · {slot.room}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+
+        {needsSlot && form.date && scheduled.length === 0 && (
+          <p className="field-warn">
+            <Info size={13} aria-hidden="true" />
+            Nothing is timetabled for that day. Pick another date, or add this as an
+            extra class instead.
+          </p>
+        )}
+
+        {form.status === 'extra' && (
+          <div className="field-grid">
+            <Field label="Subject" required error={show('code')}>
+              <select value={form.code} onChange={set('code')}>
+                {Object.entries(subjects).map(([code, s]) => (
+                  <option key={code} value={code}>{s.short} ({code})</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Type" required error={show('type')}>
+              <select value={form.type} onChange={set('type')}>
+                {SLOT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </Field>
+          </div>
+        )}
+
+        {needsTime && (
+          <>
+            <div className="field-grid">
+              <Field label={form.status === 'moved' ? 'New start' : 'Starts'} required error={show('start')}>
+                <input type="time" value={form.start} onChange={set('start')} onBlur={() => setTouched(true)} step={300} />
+              </Field>
+              <Field label={form.status === 'moved' ? 'New end' : 'Ends'} required error={show('end')}>
+                <input type="time" value={form.end} onChange={set('end')} onBlur={() => setTouched(true)} step={300} />
+              </Field>
+            </div>
+            <Field
+              label={form.status === 'moved' ? 'New room' : 'Room'} required error={show('room')}
+              hint="Where it actually happens that day."
+            >
+              <input value={form.room} onChange={set('room')} onBlur={() => setTouched(true)} placeholder="D-109" maxLength={LIMITS.room.max} />
+            </Field>
+          </>
+        )}
+
+        <Field
+          label="Note to the class" error={show('note')}
+          hint="Optional. Why, or anything they should bring."
+          counter={{ value: clean(form.note).length, max: 140 }}
+        >
+          <input
+            value={form.note} onChange={set('note')}
+            placeholder="Teacher is away at a conference"
+            maxLength={140}
+          />
+        </Field>
+
+        <p className="field-hint row" style={{ alignItems: 'flex-start', gap: 6 }}>
+          <Info size={13} aria-hidden="true" style={{ marginTop: 2, flexShrink: 0 }} />
+          This changes one date only. To change the timetable itself from now on,
+          edit the weekly slot below instead.
+        </p>
+      </form>
+    </Sheet>
+  );
+}
+
+function dateHint(date) {
+  const away = daysFromToday(date);
+  if (away == null) return null;
+  if (away === 0) return 'Today. Anyone already on their way will not see this in time.';
+  if (away === 1) return 'Tomorrow.';
+  if (away < 0) return 'That date has already passed.';
+  return `In ${away} days.`;
+}
+
 /* ══ People ══════════════════════════════════════════════════════════════════ */
 
 function PeopleTab() {
@@ -761,7 +1420,7 @@ function PeopleTab() {
   useEffect(() => onSnapshot(
     collection(db, 'roles'),
     (snap) => { setRoles(snap.docs.map((d) => ({ uid: d.id, ...d.data() }))); setError(null); },
-    (err) => setError(err.message)
+    (err) => setError(err)
   ), []);
 
   return (
@@ -770,7 +1429,7 @@ function PeopleTab() {
         <ShieldCheck size={16} aria-hidden="true" />
         <div className="alert-body">
           <strong>How access works.</strong> A class representative can edit deadlines,
-          subjects and the timetable. Only an admin can add or remove a CR, and the
+          subjects and the timetable. Only an admin can approve students or CRs, and the
           admin role itself can only be granted from the Firebase console, so nobody
           can promote themselves from inside the app, even with the developer tools open.
         </div>
@@ -780,9 +1439,9 @@ function PeopleTab() {
 
       <section className="section" style={{ marginTop: 'var(--s2)' }}>
         <div className="section-head"><h2 className="section-title">Current access</h2></div>
-        {error && <div className="alert alert-danger"><Info size={15} aria-hidden="true" />{error}</div>}
+        {error && <div className="alert alert-danger"><Info size={15} aria-hidden="true" />{friendlyError(error)}</div>}
         {roles.length === 0 && !error && (
-          <div className="card"><EmptyState icon={Users} title="No roles assigned">Everyone is a student.</EmptyState></div>
+          <div className="card"><EmptyState icon={Users} title="No roles assigned">Class access requires approval.</EmptyState></div>
         )}
         <div className="stack-sm">
           {roles.map((r) => <RoleRow key={r.uid} role={r} isSelf={r.uid === user.uid} />)}
@@ -800,7 +1459,7 @@ function RoleRow({ role, isSelf }) {
     setBusy(true);
     try {
       await deleteDoc(doc(db, 'roles', role.uid));
-      report({ ok: true }, `${role.email || role.uid} is a student again.`);
+      report({ ok: true }, `${role.email || role.uid} no longer has class access.`);
     } catch (error) {
       report({ ok: false, error });
     }
@@ -828,6 +1487,7 @@ function GrantCR({ existing }) {
   const report = useCommitToast();
   const [uid, setUid] = useState('');
   const [email, setEmail] = useState('');
+  const [grantedRole, setGrantedRole] = useState('student');
   const [touched, setTouched] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -846,12 +1506,12 @@ function GrantCR({ existing }) {
     setBusy(true);
     try {
       await setDoc(doc(db, 'roles', trimmedUid), {
-        role: 'cr',
+        role: grantedRole,
         email: clean(email),
         updatedAt: serverTimestamp(),
         updatedBy: user.uid,
       });
-      report({ ok: true }, `${clean(email)} can now manage class data.`);
+      report({ ok: true }, `${clean(email)} now has ${grantedRole === 'cr' ? 'class representative' : 'student'} access.`);
       setUid(''); setEmail(''); setTouched(false);
     } catch (error) {
       report({ ok: false, error });
@@ -862,7 +1522,7 @@ function GrantCR({ existing }) {
   return (
     <form className="card stack" onSubmit={submit}>
       <div>
-        <h2 className="section-title">Make someone a class representative</h2>
+        <h2 className="section-title">Approve a classmate</h2>
         <p className="muted small" style={{ marginTop: 2 }}>
           Find their user ID in Firebase console → Authentication → Users. They have to
           sign in once before they appear there.
@@ -876,370 +1536,15 @@ function GrantCR({ existing }) {
         <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} onBlur={() => setTouched(true)}
           placeholder="name@example.com" />
       </Field>
+      <Field label="Access level">
+        <select value={grantedRole} onChange={(e) => setGrantedRole(e.target.value)}>
+          <option value="student">Student</option>
+          <option value="cr">Class representative</option>
+        </select>
+      </Field>
       <button className="btn btn-primary" disabled={busy} type="submit">
-        <ExternalLink size={16} aria-hidden="true" /> {busy ? 'Granting…' : 'Grant CR access'}
+        <ExternalLink size={16} aria-hidden="true" /> {busy ? 'Granting…' : 'Approve access'}
       </button>
     </form>
-  );
-}
-
-/* ══ Sessions: which classes actually happened ═══════════════════════════════ */
-
-/**
- * The CR's register. Students cannot know how many classes were held, so this
- * is the one number they must be given. Everything here is one tap: the day's
- * scheduled classes are listed, and each is marked held, cancelled, or left
- * alone.
- */
-function SessionsTab() {
-  const { subjects, timetable, sessions, saveSession, deleteSession, usingDefaults } = useClassData();
-  const report = useCommitToast();
-  const [date, setDate] = useState(todayIso());
-  const [busy, setBusy] = useState(null);
-  const [bulkOpen, setBulkOpen] = useState(false);
-
-  const dayOfWeek = new Date(`${date}T00:00:00`).getDay();
-  const scheduled = useMemo(
-    () => timetable.filter((s) => s.day === dayOfWeek),
-    [timetable, dayOfWeek]
-  );
-  const onDate = useMemo(
-    () => sessions.filter((s) => s.date === date),
-    [sessions, date]
-  );
-  const recordFor = (slot) => onDate.find((s) => s.slotId === slot.id);
-
-  const isFuture = daysFromToday(date) > 0;
-
-  const mark = async (slot, status) => {
-    const existing = recordFor(slot);
-    setBusy(slot.id);
-    if (existing && existing.status === status) {
-      report(await deleteSession(existing.id), 'Record removed.');
-    } else {
-      const errors = vSession(
-        { code: slot.code, date, slotId: slot.id, status, id: existing?.id },
-        sessions
-      );
-      if (hasErrors(errors)) {
-        setBusy(null);
-        return report({ ok: false, error: new Error(Object.values(errors)[0]) });
-      }
-      report(
-        await saveSession(existing?.id ?? null, {
-          code: slot.code, date, slotId: slot.id, status, note: '',
-        }),
-        status === 'held' ? 'Marked as held.' : 'Marked as cancelled.'
-      );
-    }
-    setBusy(null);
-  };
-
-  const markAllHeld = async () => {
-    const pending = scheduled.filter((slot) => !recordFor(slot));
-    if (!pending.length) return;
-    setBusy('all');
-    let failed = 0;
-    // Sequential, because two writes for the same slot racing each other would
-    // both pass the duplicate check and create two records.
-    for (const slot of pending) {
-      const result = await saveSession(null, {
-        code: slot.code, date, slotId: slot.id, status: 'held', note: '',
-      });
-      if (!result.ok) failed++;
-    }
-    setBusy(null);
-    if (failed) report({ ok: false, error: new Error(`${failed} of ${pending.length} could not be saved.`) });
-    else report({ ok: true }, `${pending.length} ${pending.length === 1 ? 'class' : 'classes'} recorded.`);
-  };
-
-  const totals = useMemo(() => {
-    const held = sessions.filter((s) => s.status !== 'cancelled');
-    const byCode = {};
-    for (const s of held) byCode[s.code] = (byCode[s.code] || 0) + 1;
-    return { held: held.length, byCode };
-  }, [sessions]);
-
-  if (usingDefaults) {
-    return (
-      <div className="card">
-        <EmptyState icon={ClipboardCheck} title="Publish the timetable first">
-          Attendance is recorded against the published timetable, so that has to
-          exist before you can mark a class as held.
-        </EmptyState>
-      </div>
-    );
-  }
-
-  return (
-    <div className="stack">
-      <div className="alert alert-accent">
-        <Info size={16} aria-hidden="true" />
-        <p className="alert-body small">
-          Mark each class as held or cancelled. Students then mark themselves
-          present or absent against exactly these, so nobody has to guess how
-          many classes there were.
-        </p>
-      </div>
-
-      <button className="btn btn-secondary btn-block" onClick={() => setBulkOpen(true)}>
-        <CalendarRange size={17} aria-hidden="true" /> Record a date range
-      </button>
-
-      <Field label="Date" hint={isFuture ? 'That day has not happened yet.' : undefined}>
-        <input
-          type="date"
-          value={date}
-          max={todayIso()}
-          onChange={(e) => setDate(e.target.value)}
-        />
-      </Field>
-
-      {scheduled.length === 0 ? (
-        <div className="card">
-          <EmptyState icon={CalendarOff} title="No classes scheduled that day">
-            Pick another date, or add a make-up class from the Timetable tab.
-          </EmptyState>
-        </div>
-      ) : (
-        <>
-          <button
-            className="btn btn-secondary btn-block"
-            onClick={markAllHeld}
-            disabled={isFuture || busy === 'all' || scheduled.every((s) => recordFor(s))}
-          >
-            <CheckCheck size={17} aria-hidden="true" />
-            {busy === 'all' ? 'Recording…' : 'All of them went ahead'}
-          </button>
-
-          <div className="stack-sm">
-            {scheduled.map((slot) => {
-              const record = recordFor(slot);
-              const s = subjects[slot.code];
-              return (
-                <div key={slot.id} className="card card-tight card-accent" style={{ '--stripe': s?.color }}>
-                  <div className="row-between" style={{ marginBottom: 'var(--s2)' }}>
-                    <div className="grow" style={{ minWidth: 0 }}>
-                      <div className="truncate" style={{ fontWeight: 560 }}>{s?.short || slot.code}</div>
-                      <div className="muted tiny nums">
-                        {prettyTime(slot.start)} to {prettyTime(slot.end)} · {slot.room}
-                      </div>
-                    </div>
-                    {record && (
-                      <span className={`badge ${record.status === 'held' ? 'badge-success' : 'badge-warning'}`}>
-                        {record.status === 'held' ? 'Held' : 'Cancelled'}
-                      </span>
-                    )}
-                  </div>
-                  <div className="row" style={{ gap: 'var(--s2)' }}>
-                    <button
-                      className={`btn btn-sm grow ${record?.status === 'held' ? 'btn-success' : 'btn-secondary'}`}
-                      onClick={() => mark(slot, 'held')}
-                      disabled={isFuture || busy === slot.id}
-                    >
-                      <Check size={14} aria-hidden="true" /> Held
-                    </button>
-                    <button
-                      className={`btn btn-sm grow ${record?.status === 'cancelled' ? 'btn-danger' : 'btn-secondary'}`}
-                      onClick={() => mark(slot, 'cancelled')}
-                      disabled={isFuture || busy === slot.id}
-                    >
-                      <X size={14} aria-hidden="true" /> Cancelled
-                    </button>
-                  </div>
-                  {record && (
-                    <p className="field-hint" style={{ marginTop: 6 }}>
-                      Tap the same button again to undo this record.
-                    </p>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </>
-      )}
-
-      <section className="section" style={{ marginTop: 'var(--s2)' }}>
-        <div className="section-head">
-          <h2 className="section-title">Recorded so far</h2>
-          <span className="muted small">{totals.held} classes</span>
-        </div>
-        <div className="card card-flush list">
-          {Object.entries(subjects).map(([code, s]) => (
-            <div key={code} className="list-row" style={{ minHeight: 44 }}>
-              <span className="grow small truncate">{s.short}</span>
-              <span className="small nums muted">{totals.byCode[code] || 0} held</span>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {bulkOpen && (
-        <BulkRecordSheet onClose={() => setBulkOpen(false)} onDone={() => setBulkOpen(false)} />
-      )}
-    </div>
-  );
-}
-
-/**
- * Record a whole stretch of term in one go.
- *
- * A date range on its own would quietly record every public holiday and every
- * class that was called off, which is exactly the kind of wrong number this
- * whole feature exists to prevent. So the range only proposes: it lists the
- * teaching days it found, each is unticked with one tap, and anything already
- * recorded is skipped rather than duplicated.
- */
-function BulkRecordSheet({ onClose, onDone }) {
-  const { subjects, timetable, sessions, bulkRecordSessions } = useClassData();
-  const report = useCommitToast();
-
-  const [from, setFrom] = useState(() => {
-    const d = new Date();
-    d.setDate(d.getDate() - 14);
-    // format() works in local time. toISOString() would convert to UTC, which
-    // east of Greenwich rolls local midnight back to the previous day.
-    return format(d, 'yyyy-MM-dd');
-  });
-  const [to, setTo] = useState(todayIso());
-  const [skipped, setSkipped] = useState(() => new Set());
-  const [saving, setSaving] = useState(false);
-
-  // Every scheduled class on every day in the range, grouped by day.
-  const { days, rangeError, alreadyRecorded } = useMemo(() => {
-    if (!from || !to) return { days: [], rangeError: 'Pick both dates.', alreadyRecorded: 0 };
-    if (from > to) return { days: [], rangeError: 'The start date is after the end date.', alreadyRecorded: 0 };
-    if (daysFromToday(to) > 0) return { days: [], rangeError: 'The end date is in the future.', alreadyRecorded: 0 };
-
-    const spanDays = Math.round(
-      (new Date(`${to}T00:00:00`) - new Date(`${from}T00:00:00`)) / 86_400_000
-    ) + 1;
-    if (spanDays > 120) return { days: [], rangeError: 'Keep the range under 120 days.', alreadyRecorded: 0 };
-
-    // One lookup key per class already on the register, so re-running a range
-    // that overlaps an earlier one cannot double count.
-    const existing = new Set(sessions.map((s) => `${s.date}|${s.slotId ?? s.code}`));
-
-    const out = [];
-    let dupes = 0;
-    const cursor = new Date(`${from}T00:00:00`);
-    for (let i = 0; i < spanDays; i++) {
-      const date = format(cursor, 'yyyy-MM-dd');
-      const weekday = cursor.getDay();
-      const slots = timetable.filter((s) => s.day === weekday);
-      const fresh = slots.filter((s) => !existing.has(`${date}|${s.id}`));
-      dupes += slots.length - fresh.length;
-      if (fresh.length) out.push({ date, weekday, slots: fresh });
-      cursor.setDate(cursor.getDate() + 1);
-    }
-    return { days: out, rangeError: null, alreadyRecorded: dupes };
-  }, [from, to, timetable, sessions]);
-
-  const included = days.filter((d) => !skipped.has(d.date));
-  const total = included.reduce((n, d) => n + d.slots.length, 0);
-
-  const toggleDay = (date) => setSkipped((current) => {
-    const next = new Set(current);
-    if (next.has(date)) next.delete(date); else next.add(date);
-    return next;
-  });
-
-  const submit = async () => {
-    const entries = included.flatMap((d) =>
-      d.slots.map((s) => ({ code: s.code, date: d.date, slotId: s.id })));
-    if (!entries.length) return;
-    setSaving(true);
-    const result = await bulkRecordSessions(entries);
-    setSaving(false);
-    if (report(result, `${result.written} ${result.written === 1 ? 'class' : 'classes'} recorded.`)) {
-      onDone();
-    }
-  };
-
-  return (
-    <Sheet
-      open
-      onClose={onClose}
-      title="Record a date range"
-      subtitle="Marks every scheduled class in the range as held."
-      footer={
-        <>
-          <button className="btn btn-secondary" type="button" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" type="button" onClick={submit} disabled={saving || !total}>
-            {saving ? 'Recording…' : total ? `Record ${total}` : 'Nothing to record'}
-          </button>
-        </>
-      }
-    >
-      <div className="stack">
-        <div className="field-grid">
-          <Field label="From" required>
-            <input type="date" value={from} max={todayIso()} onChange={(e) => setFrom(e.target.value)} />
-          </Field>
-          <Field label="To" required>
-            <input type="date" value={to} max={todayIso()} onChange={(e) => setTo(e.target.value)} />
-          </Field>
-        </div>
-
-        {rangeError ? (
-          <p className="field-error"><AlertCircle size={13} aria-hidden="true" />{rangeError}</p>
-        ) : (
-          <>
-            <div className="alert alert-accent">
-              <Info size={15} aria-hidden="true" />
-              <span className="alert-body">
-                {total} {total === 1 ? 'class' : 'classes'} across {included.length}{' '}
-                {included.length === 1 ? 'day' : 'days'}.
-                {alreadyRecorded > 0 && ` ${alreadyRecorded} already on the register and will be skipped.`}
-              </span>
-            </div>
-
-            {days.length > 0 && (
-              <div>
-                <p className="field-label" style={{ marginBottom: 6 }}>
-                  Untick any day the class did not happen
-                </p>
-                <p className="field-hint" style={{ marginBottom: 'var(--s2)' }}>
-                  Public holidays, strikes, anything cancelled. Everything left
-                  ticked is recorded as held.
-                </p>
-                <div className="card card-flush list">
-                  {days.map((day) => {
-                    const on = !skipped.has(day.date);
-                    return (
-                      <button
-                        key={day.date}
-                        className="list-row list-row-link"
-                        onClick={() => toggleDay(day.date)}
-                        role="checkbox"
-                        aria-checked={on}
-                        style={{ opacity: on ? 1 : 0.45, textAlign: 'left' }}
-                      >
-                        <span className="task-check-box" style={{ width: 20, height: 20, flexShrink: 0 }}>
-                          {on && <Check size={12} aria-hidden="true" strokeWidth={3} />}
-                        </span>
-                        <span className="grow small nums">
-                          {format(new Date(`${day.date}T00:00:00`), 'EEE, d MMM')}
-                        </span>
-                        <span className="muted tiny truncate" style={{ maxWidth: '48%' }}>
-                          {day.slots.map((s) => subjects[s.code]?.short || s.code).join(', ')}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {days.length === 0 && (
-              <p className="field-hint">
-                No unrecorded classes in that range. Either nothing was scheduled,
-                or it is all on the register already.
-              </p>
-            )}
-          </>
-        )}
-      </div>
-    </Sheet>
   );
 }

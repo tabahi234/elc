@@ -8,14 +8,15 @@ export default function BottomNav() {
   const { canManage } = useAuth();
   const { tasks } = useAllTasks();
 
-  // Only what is actually on fire. A badge that is always lit gets ignored.
+  // Only what is actually on fire. A badge that is always lit gets ignored, and
+  // a deadline with no announced date is not on fire.
   const urgent = tasks.filter((t) => !t.completed && t.dueDate && daysUntil(t.dueDate) <= 0).length;
 
   const items = [
     { to: '/', label: 'Home', Icon: Home, end: true },
     { to: '/timetable', label: 'Classes', Icon: CalendarDays },
     { to: '/tasks', label: 'Tasks', Icon: CheckSquare, count: urgent },
-    { to: '/grades', label: 'Progress', Icon: GraduationCap },
+    { to: '/grades', label: 'Grades', Icon: GraduationCap },
     { to: '/focus', label: 'Focus', Icon: Timer },
     ...(canManage ? [{ to: '/admin', label: 'Manage', Icon: Settings2 }] : []),
   ];

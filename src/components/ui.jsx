@@ -157,13 +157,12 @@ export function ConfirmButton({ onConfirm, label = 'Delete', confirmLabel = 'Sur
 }
 
 /* ── EmptyState ─────────────────────────────────────────────────────────────── */
-export function EmptyState({ icon: Icon, title, children, action }) {
+export function EmptyState({ icon: Icon, title, children }) {
   return (
     <div className="empty">
       {Icon && <div className="empty-icon"><Icon size={21} aria-hidden="true" /></div>}
       {title && <p className="empty-title">{title}</p>}
       {children && <p className="empty-text">{children}</p>}
-      {action}
     </div>
   );
 }

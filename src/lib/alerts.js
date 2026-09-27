@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from 'react';
 import { daysFromToday, todayIso } from './validate';
-import { ATTENDANCE_MIN, attendanceStats } from './progress';
+import { describeChange } from './schedule';
 
 /**
  * Turns the app's state into a ranked list of things the student has to act
@@ -16,9 +16,12 @@ export function roomChanges(timetable) {
   return timetable.filter((s) => s.changeNote && (!s.changeUntil || s.changeUntil >= today));
 }
 
-export function buildAlerts({ tasks = [], subjects = {}, marks = {}, sessions = [], weeklySessions = {}, semesterWeeks = 16, timetable = [] }) {
+export function buildAlerts({ tasks = [], subjects = {}, timetable = [], changes = [] }) {
   const alerts = [];
+  // A deadline with no announced date cannot be urgent yet, so it is left out
+  // of everything here rather than treated as due today.
   const pending = tasks.filter((t) => !t.completed && t.dueDate);
+  const label = (t) => `${subjects[t.subject]?.short || t.subject}: ${t.title}`;
 
   const overdue = pending.filter((t) => daysFromToday(t.dueDate) < 0);
   if (overdue.length) {
@@ -38,7 +41,7 @@ export function buildAlerts({ tasks = [], subjects = {}, marks = {}, sessions = 
       severity: 'critical',
       to: '/tasks',
       title: `${dueToday.length} due today`,
-      detail: dueToday.map((t) => `${subjects[t.subject]?.short || t.subject}: ${t.title}`).join(' · '),
+      detail: dueToday.map(label).join(' · '),
     });
   }
 
@@ -49,14 +52,17 @@ export function buildAlerts({ tasks = [], subjects = {}, marks = {}, sessions = 
       severity: 'warning',
       to: '/tasks',
       title: `${dueTomorrow.length} due tomorrow`,
-      detail: dueTomorrow.map((t) => `${subjects[t.subject]?.short || t.subject}: ${t.title}`).join(' · '),
+      detail: dueTomorrow.map(label).join(' · '),
     });
   }
 
   // Quizzes and sessionals get their own heads-up, because unlike an
   // assignment you cannot hand one in late.
-  const exams = pending.filter((t) => ['Quiz', 'Sessional', 'Final'].includes(t.type));
-  const examSoon = exams.filter((t) => { const d = daysFromToday(t.dueDate); return d >= 2 && d <= 5; });
+  const examSoon = pending.filter((t) => {
+    if (!['Quiz', 'Sessional', 'Final'].includes(t.type)) return false;
+    const d = daysFromToday(t.dueDate);
+    return d >= 2 && d <= 5;
+  });
   for (const t of examSoon) {
     alerts.push({
       id: `exam-${t.id}`,
@@ -67,28 +73,21 @@ export function buildAlerts({ tasks = [], subjects = {}, marks = {}, sessions = 
     });
   }
 
-  for (const code of Object.keys(subjects)) {
-    const stats = attendanceStats(marks, sessions, code, weeklySessions, semesterWeeks);
-    // Nothing to say until the student has actually answered for a class.
-    if (!stats.answered) continue;
-    const name = subjects[code]?.short || code;
-    if (stats.pct < ATTENDANCE_MIN) {
-      alerts.push({
-        id: `att-${code}`,
-        severity: 'critical',
-        to: '/grades',
-        title: `${name} attendance is ${Math.round(stats.pct)}%`,
-        detail: `${stats.present} of ${stats.answered} attended. Below the ${ATTENDANCE_MIN}% needed to sit the final.`,
-      });
-    } else if (stats.skipsLeft <= 1) {
-      alerts.push({
-        id: `att-${code}`,
-        severity: 'warning',
-        to: '/grades',
-        title: `${name}: ${stats.skipsLeft > 0 ? '1 safe skip left' : 'no safe skips left'}`,
-        detail: `${Math.round(stats.pct)}% attended so far.`,
-      });
-    }
+  // A class called off today or tomorrow is the single most useful thing this
+  // panel can say: it is the difference between staying home and commuting in
+  // for nothing. It outranks a standing room-change note, which is why it is
+  // built first.
+  for (const change of changes) {
+    const away = daysFromToday(change.date);
+    if (away == null || away < 0 || away > 1) continue;
+    const { headline, detail } = describeChange(change, subjects, timetable);
+    alerts.push({
+      id: `change-${change.id}`,
+      severity: change.status === 'cancelled' && away === 0 ? 'critical' : 'warning',
+      to: '/timetable',
+      title: headline,
+      detail: change.note || detail,
+    });
   }
 
   for (const slot of roomChanges(timetable)) {
@@ -137,8 +136,8 @@ const writeStore = (key, value) => { try { localStorage.setItem(key, value); } c
  */
 export function useDeadlineNotifications(tasks, subjects) {
   const summary = useMemo(() => {
-    const pending = tasks.filter((t) => !t.completed && t.dueDate);
-    const urgent = pending.filter((t) => {
+    const urgent = tasks.filter((t) => {
+      if (t.completed || !t.dueDate) return false;
       const d = daysFromToday(t.dueDate);
       return d !== null && d <= 1;
     });
@@ -162,7 +161,7 @@ export function useDeadlineNotifications(tasks, subjects) {
       new Notification(`${summary.count} deadline${summary.count === 1 ? '' : 's'} need you today`, {
         body: summary.body,
         tag: 'unihelper-deadlines',
-        icon: '/pwa-192x192.png',
+        icon: '/icon-192.png',
       });
     } catch { /* some browsers only allow this from a service worker */ }
   }, [summary]);

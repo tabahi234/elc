@@ -37,6 +37,11 @@ service cloud.firestore {
     }
     function isAdmin()  { return signedIn() && roleOf(request.auth.uid) == 'admin'; }
     function isCR()     { return signedIn() && roleOf(request.auth.uid) == 'cr'; }
+    function isMember() {
+      return signedIn()
+          && exists(/databases/$(database)/documents/roles/$(request.auth.uid))
+          && roleOf(request.auth.uid) in ['student', 'cr', 'admin'];
+    }
     // CR = class representative. Can manage class content, cannot manage people.
     function manages()  { return isAdmin() || isCR(); }
 
@@ -59,7 +64,11 @@ service cloud.firestore {
     }
     function hhmm(v)      { return v is string && v.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$'); }
     // Years are clamped to 2025-2035 so nobody can park a task in the year 9999.
-    function isoDate(v)   { return v is string && v.matches('^20(2[5-9]|3[0-5])-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'); }
+    function isoDate(v) {
+      return v is string && (
+        v.matches('^20(2[5-9]|3[0-5])-((0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01])|(0[469]|11)-(0[1-9]|[12][0-9]|30)|02-(0[1-9]|1[0-9]|2[0-8]))$')
+        || v.matches('^20(28|32)-02-29$'));
+    }
     function hexColor(v)  { return v is string && v.matches('^#[0-9a-fA-F]{6}$'); }
     function subjectCode(v) { return v is string && v.matches('^[A-Z]{2,4}[0-9]{3}$'); }
     function subjectExists(code) {
@@ -75,7 +84,7 @@ service cloud.firestore {
     // ── /roles/{uid} — who may manage class content ─────────────────────────
     match /roles/{uid} {
       // You may always read your own role; managers may read any (to show names).
-      allow get:  if signedIn() && (request.auth.uid == uid || manages());
+      allow get:  if signedIn() && (request.auth.uid == uid || isAdmin());
       allow list: if isAdmin();
 
       function validRole() {
@@ -97,7 +106,7 @@ service cloud.firestore {
 
     // ── /subjects/{code} — one doc per course ───────────────────────────────
     match /subjects/{code} {
-      allow read: if signedIn();
+      allow read: if isMember();
 
       function validSubject() {
         let d = request.resource.data;
@@ -123,7 +132,7 @@ service cloud.firestore {
 
     // ── /timetable/{slotId} — one doc per weekly class slot ─────────────────
     match /timetable/{slotId} {
-      allow read: if signedIn();
+      allow read: if isMember();
 
       function validSlot() {
         let d = request.resource.data;
@@ -145,32 +154,9 @@ service cloud.firestore {
       allow delete:         if manages();
     }
 
-    // ── /sessions/{id} — classes the CR confirms actually happened ──────────
-    // The denominator for attendance. A student cannot know how many classes
-    // were held, so only a manager may record them; students mark themselves
-    // present or absent against these, privately, under their own uid.
-    match /sessions/{sessionId} {
-      allow read: if signedIn();
-
-      function validSession() {
-        let d = request.resource.data;
-        return d.keys().hasOnly(['code','date','slotId','status','note',
-                                 'updatedAt','updatedBy'])
-            && d.keys().hasAll(['code','date','status'])
-            && subjectCode(d.code) && subjectExists(d.code)
-            && isoDate(d.date)
-            && d.status in ['held', 'cancelled']
-            && (!('slotId' in d) || d.slotId == null || str(d.slotId, 1, 128))
-            && (!('note' in d) || str(d.note, 0, 140))
-            && stamped();
-      }
-      allow create, update: if manages() && validSession();
-      allow delete:         if manages();
-    }
-
     // ── /globalTasks/{id} — deadlines broadcast to the whole class ──────────
     match /globalTasks/{taskId} {
-      allow read: if signedIn();
+      allow read: if isMember();
 
       function validTask() {
         let d = request.resource.data;
@@ -180,12 +166,15 @@ service cloud.firestore {
             && str(d.title, 3, 120)
             && subjectCode(d.subject) && subjectExists(d.subject)
             && d.type in ['Assignment','Quiz','Sessional','Final','Lab','Project','Presentation']
-            && isoDate(d.dueDate)
+            // Nullable on purpose: a deadline is often announced before its
+            // date is fixed, and the class should hear about it either way.
+            && (d.dueDate == null || isoDate(d.dueDate))
             && (!('dueTime' in d) || d.dueTime == '' || hhmm(d.dueTime))
             && (!('note' in d) || str(d.note, 0, 500))
             && stamped();
       }
       allow create: if manages() && validTask()
+                    && request.resource.data.createdAt == request.time
                     && request.resource.data.createdBy == request.auth.uid;
       // createdBy/createdAt are immutable, so authorship can't be rewritten.
       allow update: if manages() && validTask()
@@ -194,21 +183,84 @@ service cloud.firestore {
       allow delete: if manages();
     }
 
+    // ── /classChanges/{id} — one-off departures from the weekly timetable ───
+    // A cancelled, moved or extra class on one named date. Class-wide, so only
+    // a manager writes them; everyone signed in reads them.
+    match /classChanges/{changeId} {
+      allow read: if isMember();
+
+      function validChange() {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['date','slotId','code','status','start','end',
+                                 'room','type','note','updatedAt','updatedBy'])
+            && d.keys().hasAll(['date','slotId','code','status','start','end','room','type'])
+            && isoDate(d.date)
+            && subjectCode(d.code) && subjectExists(d.code)
+            && d.status in ['cancelled', 'moved', 'extra']
+            // A cancellation and a move name the recurring slot they change.
+            // An extra class has no slot behind it, so its slotId is null and
+            // it has to carry its own time, room and type.
+            && (d.status == 'extra' ? d.slotId == null
+                : (str(d.slotId, 1, 128)
+                   && exists(/databases/$(database)/documents/timetable/$(d.slotId))
+                   && get(/databases/$(database)/documents/timetable/$(d.slotId)).data.code == d.code))
+            && (d.status == 'cancelled'
+                  ? (d.start == '' && d.end == '' && d.room == '' && d.type == '')
+                  : (hhmm(d.start) && hhmm(d.end)
+                     && d.end > d.start
+                     && str(d.room, 1, 24)
+                     && d.type in ['Lecture', 'LAB', 'Tutorial', 'Online']))
+            && (!('note' in d) || str(d.note, 0, 140))
+            && stamped();
+      }
+      allow create, update: if manages() && validChange();
+      allow delete:         if manages();
+    }
+
+    // ── /announcements/{id} — notices that are not deadlines ────────────────
+    match /announcements/{announcementId} {
+      allow read: if isMember();
+
+      function validAnnouncement() {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['title','body','until','createdAt','createdBy',
+                                 'updatedAt','updatedBy'])
+            && d.keys().hasAll(['title','createdAt','createdBy'])
+            && str(d.title, 3, 120)
+            && (!('body' in d) || str(d.body, 0, 500))
+            // An empty expiry means it stays up until someone takes it down.
+            && (!('until' in d) || d.until == '' || isoDate(d.until))
+            && stamped();
+      }
+      allow create: if manages() && validAnnouncement()
+                    && request.resource.data.createdAt == request.time
+                    && request.resource.data.createdBy == request.auth.uid;
+      // createdBy/createdAt are immutable, so authorship can't be rewritten.
+      allow update: if manages() && validAnnouncement()
+                    && request.resource.data.createdBy == resource.data.createdBy
+                    && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if manages();
+    }
+
     // ── /users/{uid} — private per-student data ─────────────────────────────
     // Only the owner, ever. Not even an admin can read a classmate's grades.
     match /users/{uid}/data/{key} {
-      allow read: if signedIn() && request.auth.uid == uid;
-      allow write: if signedIn() && request.auth.uid == uid
-                   && key in ['gradebook','attendance','attendanceMarks','credits',
-                              'profile','studylog','settings','taskState']
+      allow read: if isMember() && request.auth.uid == uid;
+      allow create, update: if isMember() && request.auth.uid == uid
+                   && key in ['gradebook','credits','profile','studylog',
+                              'settings','taskState']
                    && request.resource.data.keys().hasOnly(['value','updatedAt'])
+                   && request.resource.data.keys().hasAll(['value','updatedAt'])
+                   && request.resource.data.updatedAt == request.time
+                   && (key == 'studylog' ? request.resource.data.value is list
+                       : request.resource.data.value is map)
                    // Caps runaway writes; the client enforces the real limits.
                    && (!(request.resource.data.value is list)
                        || request.resource.data.value.size() <= 2000);
     }
 
     match /users/{uid}/tasks/{taskId} {
-      allow read: if signedIn() && request.auth.uid == uid;
+      allow read: if isMember() && request.auth.uid == uid;
 
       function validPersonalTask() {
         let d = request.resource.data;
@@ -232,8 +284,8 @@ service cloud.firestore {
             && (!('note' in d) || str(d.note, 0, 500))
             && d.completed is bool;
       }
-      allow create, update: if signedIn() && request.auth.uid == uid && validPersonalTask();
-      allow delete: if signedIn() && request.auth.uid == uid;
+      allow create, update: if isMember() && request.auth.uid == uid && validPersonalTask();
+      allow delete: if isMember() && request.auth.uid == uid;
     }
 
     // ── everything else is denied ───────────────────────────────────────────

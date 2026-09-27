@@ -1,13 +1,14 @@
 # UniHelper
 
-A PWA for one university class: shared timetable and deadlines, private grades,
-attendance and study tracking. React + Vite + Firebase.
+A PWA for one university class: shared timetable and deadlines, private grades
+and study tracking. React + Vite + Firebase.
 
 ```bash
 npm install
 npm run dev      # http://localhost:5173
 npm run build
 npm run lint
+npm run icons    # redraw the favicon and every app icon
 ```
 
 ---
@@ -38,9 +39,10 @@ Google account. Switch with `firebase login --reauth`, then:
 npm run deploy:rules
 ```
 
-Until the rules are published the app cannot read your role document, so the
-Manage tab stays hidden. Since version 2 the dashboard says so explicitly
-instead of silently treating you as a student.
+Publish the updated app and rules together. A verified Google account alone
+does not grant access: every user needs an explicit `roles/{uid}` document with
+`role` exactly `student`, `cr`, or `admin`. Missing or unreadable approval shows
+the approval screen. See [SECURITY.md](SECURITY.md) for rollout and test details.
 
 ### 2. Make yourself an admin
 
@@ -54,6 +56,11 @@ even with the developer tools open. Create it by hand, once:
    document id = your UID, one field: `role` (string) = `admin`.
 
 Reload the app. A **Manage** tab appears in the bottom nav.
+
+Use **Manage → People → Approve a classmate** to approve each student or CR.
+Students can copy their user ID from the approval screen after signing in.
+Deleting a role revokes class access completely; to demote a CR while retaining
+access, approve their existing user ID with the Student access level.
 
 ### 3. Publish the starter timetable
 
@@ -79,19 +86,22 @@ with another one.
 | | Student | CR | Admin |
 |---|---|---|---|
 | See timetable, subjects, class deadlines | ✅ | ✅ | ✅ |
-| Own grades, attendance, study log, personal tasks | ✅ | ✅ | ✅ |
+| Own grades, study log, personal tasks | ✅ | ✅ | ✅ |
 | Announce a class deadline | , | ✅ | ✅ |
+| Post a notice | , | ✅ | ✅ |
+| Cancel, move or add a single class | , | ✅ | ✅ |
 | Edit subjects, Drive / Classroom links | , | ✅ | ✅ |
 | Edit the timetable, change a room | , | ✅ | ✅ |
 | Add or remove a CR | , | , | ✅ |
 | Create another admin | , | , | Firebase console only |
 
-An admin appoints a CR from **Manage → People** using their Firebase user ID
+An admin approves a student or appoints a CR from **Manage → People** using their Firebase user ID
 (they have to sign in once first, so they exist in Authentication).
 
-A student's grades, attendance and study log are readable only by that student.
-**Not by the CR, and not by an admin**. that is enforced in the rules, not just
-hidden in the UI.
+A student's grades and study log are readable only by that student. **Not by
+the CR, and not by an admin**. That is enforced in the rules, not just hidden
+in the UI. Operators with Firebase project/IAM or Admin SDK access are outside
+these client rules and can access stored data.
 
 ---
 
@@ -102,8 +112,7 @@ from the console. So the rules assume the React app is hostile.
 
 **Roles are checked server-side.** `firestore.rules` re-reads `roles/{uid}` on
 every write. Hiding the Manage tab is a courtesy; the rules are the lock.
-Pasting `/admin` into the URL bar gets you a form whose every submission the
-server rejects.
+The `/admin` screen is gated too, but the rules remain the security boundary.
 
 **One document per row.** Subjects and timetable slots used to live inside a
 single `classData/main` document as a nested map and array. Firestore rules
@@ -116,8 +125,9 @@ decade.
 **Links are host-allowlisted.** A Drive link must be on `drive.google.com` or
 `docs.google.com`; a Classroom link on `classroom.google.com`. Enforced in the
 rules and again in `safeLink()` before anything is rendered into an `href`. This
-closes a real XSS hole , a `javascript:` URL in that field would otherwise run
-on every classmate's device. Shorteners and redirects are rejected on purpose.
+rejects executable schemes such as `javascript:` and look-alike domains.
+Google controls what happens after a permitted link is opened; this is not an
+audit of the linked document or of redirects on those external sites.
 
 **Authorship cannot be forged.** Class-content writes must stamp
 `updatedBy == request.auth.uid` and `updatedAt == request.time`, and a task's
@@ -126,19 +136,20 @@ on every classmate's device. Shorteners and redirects are rejected on purpose.
 **Private data is owner-only.** `users/{uid}/**` is readable and writable by
 that uid alone, with the key names allowlisted.
 
-### The one thing the rules do not enforce
+### Data-integrity limits
 
 The study log is a single array document. Rules cannot iterate it, so they only
 cap its length; the per-session and per-day limits are enforced in
 `src/lib/validate.js`. That is the right place for them , the data is private to
-its owner, so the only thing at risk is whether their own GPA projection means
-anything. It is a data-integrity guard, not a security boundary.
+its owner. The rules validate the outer value shape, allowed document keys and
+server timestamp. Nested grade entries, study limits, timetable overlaps and
+duplicate one-off changes still rely on client validation.
 
 ### If sign-in starts failing for everyone
 
 `signedIn()` in the rules also requires `request.auth.token.email_verified`.
-Google accounts always set it. If you add another sign-in provider that does
-not, drop that clause.
+Keep email verification enforced when adding providers. Complete email
+verification and provision approval before granting access.
 
 ---
 
@@ -187,7 +198,7 @@ after changing any colour token.
 | A student's own task | `users/{uid}/tasks` | that student only | that student |
 | A class deadline | `globalTasks` | everyone signed in | CR and admin only |
 
-A student's tasks, grades, attendance and study log are readable by that
+A student's tasks, grades and study log are readable by that
 student and nobody else. Not a classmate, not the CR, not an admin. That is
 enforced in the rules, not hidden in the UI.
 
@@ -206,41 +217,169 @@ Edits a CR makes afterwards do not flow into an existing copy. The edit sheet
 says so, because the alternative is a student quietly working from a stale
 due date.
 
-## Attendance: who supplies which number
+## One-off class changes
 
-A student cannot know how many classes were held. The old design asked them to,
-by making them tap Present or Absent to increment their own counter; miss one
-tap and every percentage after it is silently wrong.
+The timetable is a weekly pattern. Reality is not. `classChanges` records what
+happens instead, on one named date:
 
-The denominator now comes from the CR:
+| | Points at | Carries |
+|---|---|---|
+| `cancelled` | the recurring slot | nothing else, the rules reject a replacement time |
+| `moved` | the recurring slot | new start, end and room for that date only |
+| `extra` | nothing (`slotId` is null) | its own subject, time, room and type |
 
-1. **Manage -> Register.** Pick a date, and the classes scheduled that day are
-   listed. Mark each one held or cancelled, or press *All of them went ahead*.
-   Tapping the same button again removes the record.
-1b. **Catching up.** *Record a date range* takes a start and end date and
-   proposes every scheduled class between them. It lists the teaching days it
-   found so holidays and cancellations can be unticked, and skips anything
-   already on the register, so re-running an overlapping range cannot double
-   count. Capped at 120 days, written in batches of 400.
-2. **Progress -> Attendance.** Each student sees exactly those classes and
-   answers Present or Absent for each. Tapping the same answer again clears it,
-   which is why there is no separate undo control.
+This is the most expensive thing the app previously could not say. A rolling
+"room changed" note on the slot cannot express it, because the change belongs
+to a date, not to every Wednesday from now on, and a student who reads the
+weekly grid commutes in for a class that was called off.
 
-Percentages count only classes the student has answered for, so an unanswered
-class never reads as an absence. The count of unanswered ones is shown at the
-top so it cannot be quietly ignored. Cancelled classes are excluded from the
-denominator entirely.
+Everything that shows a class goes through `src/lib/schedule.js`, so the
+dashboard, the week view and the alerts can never disagree about whether one is
+running:
 
-Sessions live in `sessions/{id}`, readable by everyone and writable only by a
-manager. A student's answers live in their own `attendanceMarks` document and
-are private to them.
+- `classesOn(date, timetable, changes)` folds the changes into that weekday's
+  pattern, re-sorts moved classes into their new time, and **keeps** a cancelled
+  class in the list with a flag. A gap where a class used to be reads as a bug;
+  a struck-through row reads as information.
+- `nextClass(now, …)` walks forward a day at a time and skips anything
+  cancelled, so a called-off class pushes the answer along instead of being the
+  answer.
+- `describeChange()` writes the one-line wording used by the CR's list, the
+  student's week view, the dashboard alert and the share text, so all four say
+  the same thing.
+
+A cancellation today is a `critical` alert and outranks a standing room-change
+note. Changes clear themselves once the date passes; nothing has to be tidied up
+for the app to stay correct.
+
+The form refuses two changes to the same class on the same date. This
+uniqueness check is not enforced by the rules; trusted managers using the SDK
+directly must avoid duplicates. Rules do enforce the referenced slot and subject.
+
+## Notices
+
+`announcements` is for everything the class needs to hear that is not a
+deadline: bring a calculator, the lab report format changed, Friday's class is
+in the other block. Previously this either got dressed up as a fake deadline or
+went to WhatsApp, where it scrolled away in twenty minutes.
+
+Each notice carries an expiry date and the form pushes hard for one. That is the
+whole trick: a board nobody clears becomes wallpaper, and then the notice that
+matters gets read as wallpaper too. Expired notices stay in Manage so the CR can
+delete them or put one back up, and disappear from every student's dashboard on
+their own.
+
+## Sharing into the class group
+
+A CR who has just typed a deadline in here should not have to retype it in
+WhatsApp. That is where the wording drifts, the date gets transposed, and half
+the class ends up working from a different deadline to the other half.
+
+Every deadline, notice and class change in Manage has a share button.
+`navigator.share` opens the phone's real share sheet, so it lands in the group
+as text. On a desktop browser there is no share sheet, so it goes to the
+clipboard instead and the toast says so. Backing out of the share sheet is not a
+failure and does not toast.
+
+The text is plain: no markdown and no emoji, because WhatsApp renders neither
+the way the sender expects and a deadline is not the place to find that out.
+
+## Deadlines with no date yet
+
+A teacher often mentions an assignment weeks before fixing when it is due. The
+old model could not express that: `dueDate` was required, so a CR either
+invented a date or said nothing, and both are worse than the truth.
+
+`dueDate` is now nullable, in the rules as well as the form. An undated
+deadline:
+
+- shows **Date not announced yet** wherever a countdown would normally go
+- sorts to the top of *Upcoming* in Manage, never into *Past*
+- raises no alert, no nav badge and no notification, because nothing is urgent
+  about a date that does not exist yet
+- gets a countdown the moment the CR fills the date in
+
+Personal tasks have always been allowed to have no date. They say **No date**,
+which is a different thing from nobody having announced one.
+
+## Undoing a study session
+
+Logging 25 minutes against the wrong subject is the single easiest mistake to
+make in this app: the timer banks the session on whichever subject the dropdown
+happened to be showing. Two ways out, because the mistake gets noticed at two
+different times:
+
+- the confirmation toast carries an **Undo** button and stays up for eight
+  seconds, which covers noticing straight away
+- **Focus -> Logged today** lists every session logged today with its time and
+  subject, each removable, which covers noticing an hour later
+
+Entries now carry an `id` so one can be removed by identity. Entries written
+before that exist without one and are matched on subject, minutes and timestamp
+instead.
+
+## When something goes wrong
+
+Nothing shows a student a Firebase error code, a rule name or a file path.
+They can act on none of it, and it reads like the app blaming them. The real
+error goes to `console.error` for whoever runs the app; the student gets one
+sentence.
+
+- `src/lib/errors.js` maps every Firestore error code to that sentence.
+  Anything unrecognised falls back to a plain retry message.
+- `ErrorBoundary` wraps the whole app and again each screen, keyed on the
+  path. A crash is contained to that screen, and navigating to another tab
+  clears it without a reload.
+- An unknown address gets a real **404** listing the five screens that exist.
+  It used to redirect silently to the dashboard, which looks exactly like the
+  app ignoring the tap.
+- `OfflineBar` indicates lost connectivity. The app shell is cached, but private
+  records now use memory only. Reloading requires a connection to check approval,
+  and pending writes can be lost when closing or reloading offline.
+
+## Icons
+
+`npm run icons` runs `scripts/generate-icons.mjs`, which draws the mortarboard
+mark once and emits the favicon SVG, a 32px PNG, an Apple touch icon and the
+three manifest icons from the same geometry. No dependencies: the PNG encoder
+is zlib plus a CRC table, and the rasteriser is a scanline fill with 4x4
+supersampling.
+
+It exists because the manifest used to point at `pwa-192x192.png` and
+`pwa-512x512.png`, neither of which was ever created, so installing the app on
+Android produced a blank icon. Generating them removes the chance of that
+happening again, and of the SVG and the PNGs drifting apart.
+
+The maskable icon is a separate file rather than the same artwork tagged
+`maskable`, because Android crops a maskable icon to a circle and the rounded
+plate would lose its corners.
 
 ## Legal
 
 `src/lib/legal.js` holds a short privacy notice and short terms, as plain
-bullet lists describing what this app actually does. Both are shown in full on
-first use and must be accepted; the record stores `CONSENT_VERSION`, so bumping
-that constant asks everyone again. Also at `/privacy` and `/terms`.
+bullet lists describing what this app actually does.
+
+**Agreement is given before Google is ever opened.** The sign-in card carries a
+tick box, with *Privacy Policy* and *Terms of Use* as inline links that open the
+document in a sheet; the sign-in button stays disabled until it is ticked. The
+old order asked for a Google account first and only then said what the app does
+with it, which is the wrong way round: by the time anyone read the terms they
+had already handed over the part that mattered. It also put three screens
+between opening the app and seeing anything useful.
+
+The tick is held in `Shell` across the Login-to-app swap and written to the
+student's own settings document the moment sign-in gives it a uid to file it
+under, recording which `CONSENT_VERSION` was agreed to. It counts for that
+session immediately, so nobody who has just agreed is asked again while the
+write is in flight. If the write fails they simply tick again next session.
+
+`components/Consent.jsx` survives as the **re-consent** screen, for the one
+case the sign-in card cannot cover: a session that is already signed in when
+the wording changes underneath it. Its stored consent names an older version,
+and agreement to an older text is not agreement to this one, so it asks there
+with both documents in full. A first run never sees it.
+
+The documents are also at `/privacy` and `/terms` once inside the app.
 
 Not legal advice. Read them and change anything that stops being true.
 
@@ -270,7 +409,6 @@ Set in one place , `src/lib/validate.js`, `LIMITS`.
 | Study per day, all subjects | warn at 10h, refuse over 12h |
 | A class slot | 30 min - 5h, between 06:00 and 23:00, no overlaps |
 | Marks | obtained ≤ total, total ≤ 1000, weight 0-100 |
-| Attendance | attended ≤ held, held ≤ planned sessions + 6 |
 | Due dates | within a year either side of today |
 | Credits | 0-6 · previous CGPA 0-4 |
 
@@ -286,17 +424,25 @@ src/
   lib/
     validate.js         all input rules and limits
     alerts.js           derives the alert list + the daily notification
+    schedule.js         the weekly pattern with one-off changes folded in
+    announcements.js    which notices are still live
+    share.js            share-sheet plumbing and the text it sends
     auth.jsx            sign-in and the role lookup
     classDataContext.jsx  shared subjects / timetable / deadlines
     useTasks.js         personal tasks merged with class deadlines
     storage.js          per-user Firestore-backed useState
-    grading.js          GPA maths        progress.js  gradebook + attendance
-    study.js            study log        toast.jsx    toast notifications
+    grading.js          GPA maths        progress.js  gradebook + GPA
+    study.js            study log        toast.jsx    toasts, with undo
+    errors.js           every failure turned into a sentence a student can act on
   components/
     ui.jsx              Field, Sheet, ConfirmButton, EmptyState, Tabs
+    ErrorBoundary.jsx   catches a crashed screen
+    OfflineBar.jsx      one line while there is no signal
     BottomNav.jsx
   pages/
-    Dashboard · Timetable · Tasks · Grades · Focus · Admin · Login
+    Dashboard · Timetable · Tasks · Grades · Focus · Admin · Login · NotFound
+scripts/
+  generate-icons.mjs    draws every icon and the favicon from one definition
 ```
 
 Deadline alerts use the browser Notification API: opt-in from the account

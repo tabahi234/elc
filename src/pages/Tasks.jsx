@@ -5,10 +5,11 @@ import {
   StickyNote, Pencil, CopyPlus, Lock, RefreshCw, BellRing,
 } from 'lucide-react';
 import { useClassData } from '../lib/classDataContext';
-import { useAllTasks, dueLabel, daysUntil } from '../lib/useTasks';
+import { useAllTasks, dueBadge, daysUntil } from '../lib/useTasks';
 import { useToast } from '../lib/toastContext';
 import { Field, Sheet, ConfirmButton, EmptyState, Tabs, CardSkeleton } from '../components/ui';
 import { LIMITS, TASK_TYPES, clean, hasErrors, vTask, dueDateHint } from '../lib/validate';
+import { friendlyError } from '../lib/errors';
 
 export default function Tasks() {
   const { subjects } = useClassData();
@@ -37,7 +38,7 @@ export default function Tasks() {
         ? 'Your copy is gone. The class deadline is back on your list.'
         : 'Task deleted.');
     } catch (err) {
-      toast.error(err.message);
+      toast.error(friendlyError(err));
     }
   };
 
@@ -46,7 +47,7 @@ export default function Tasks() {
       await adoptTask(task);
       toast.success('Copied to your tasks. Edit it however you like; the class version is untouched.');
     } catch (err) {
-      toast.error(err.message);
+      toast.error(friendlyError(err));
     }
   };
 
@@ -54,14 +55,14 @@ export default function Tasks() {
     try {
       await applyClassUpdate(task);
       toast.success('Your copy now matches the class version.');
-    } catch (err) { toast.error(err.message); }
+    } catch (err) { toast.error(friendlyError(err)); }
   };
 
   const keepMine = async (task) => {
     try {
       await dismissClassUpdate(task);
       toast.info('Keeping your version. You will be told again if the CR changes it further.');
-    } catch (err) { toast.error(err.message); }
+    } catch (err) { toast.error(friendlyError(err)); }
   };
 
   const save = async (data) => {
@@ -75,7 +76,7 @@ export default function Tasks() {
       }
       setEditing(null);
     } catch (err) {
-      toast.error(err.message);
+      toast.error(friendlyError(err));
     }
   };
 
@@ -112,12 +113,13 @@ export default function Tasks() {
             deadlines, which come from a different listener and are usually
             still fine. Warn, then show whatever did load. */}
         {error && (
-          <div className="alert alert-danger">
+          <div className="alert alert-warning">
             <AlertCircle size={16} aria-hidden="true" />
             <div className="alert-body">
-              <strong>Could not load your own tasks.</strong>
+              <strong className="small">Your own tasks could not load</strong>
               <p className="small" style={{ marginTop: 2 }}>
-                {error} Class deadlines below are still up to date.
+                {friendlyError(error, 'Pull down to reload in a moment.')} Class deadlines
+                below are still up to date.
               </p>
             </div>
           </div>
@@ -166,7 +168,7 @@ export default function Tasks() {
 }
 
 function TaskCard({ task, subject, onToggle, onDelete, onEdit, onAdopt, onApplyUpdate, onKeepMine }) {
-  const due = dueLabel(task.dueDate, task.completed);
+  const due = dueBadge(task);
   const isClass = task.source === 'class';
 
   return (
@@ -199,7 +201,8 @@ function TaskCard({ task, subject, onToggle, onDelete, onEdit, onAdopt, onApplyU
           {due && (
             <span className={`badge ${due.tone}`}>
               <CalendarClock size={10} aria-hidden="true" /> {due.text}
-              {task.dueTime && ` ${format(new Date(`2000-01-01T${task.dueTime}`), 'h:mm a')}`}
+              {/* A time without a date says nothing, so it waits for one. */}
+              {task.dueDate && task.dueTime && ` ${format(new Date(`2000-01-01T${task.dueTime}`), 'h:mm a')}`}
             </span>
           )}
         </div>
@@ -349,7 +352,10 @@ function TaskSheet({ task, subjects, onClose, onSave }) {
         </div>
 
         <div className="field-grid">
-          <Field label="Due date" error={show('dueDate')} hint={dueDateHint(form.dueDate) || 'Optional.'}>
+          <Field
+            label="Due date" error={show('dueDate')}
+            hint={dueDateHint(form.dueDate) || 'Leave empty if there is no fixed date.'}
+          >
             <input type="date" value={form.dueDate} onChange={set('dueDate')} onBlur={() => setTouched(true)} />
           </Field>
           <Field label="Time" error={show('dueTime')}>

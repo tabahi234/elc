@@ -6,6 +6,7 @@ import { useAuth } from './authContext';
 import { useClassData } from './classDataContext';
 import { useUserDoc } from './storage';
 import { TASK_TYPES, daysFromToday } from './validate';
+import { timestampMillis } from './timestamps';
 
 export { TASK_TYPES };
 
@@ -19,6 +20,9 @@ export function useTasks() {
   const [error, setError] = useState(null);
 
   useEffect(() => {
+    setTasks([]);
+    setError(null);
+    setLoading(true);
     if (!user) { setLoading(false); return; }
     const q = query(collection(db, 'users', user.uid, 'tasks'), orderBy('createdAt', 'desc'));
     return onSnapshot(q, (snap) => {
@@ -27,7 +31,7 @@ export function useTasks() {
       setError(null);
     }, (err) => {
       console.error('Tasks listener:', err);
-      setError(err.message);
+      setError(err);
       setLoading(false);
     });
   }, [user]);
@@ -197,20 +201,32 @@ export function sortTasks(tasks) {
     if (a.dueDate && b.dueDate && a.dueDate !== b.dueDate) return a.dueDate.localeCompare(b.dueDate);
     if (a.dueDate && !b.dueDate) return -1;
     if (!a.dueDate && b.dueDate) return 1;
-    return String(b.createdAt || '').localeCompare(String(a.createdAt || ''));
+    return timestampMillis(b.createdAt) - timestampMillis(a.createdAt);
   });
 }
 
 export const daysUntil = daysFromToday;
 
-/** Badge text and tone for a due date. */
-export function dueLabel(dueDate, completed) {
-  if (!dueDate) return null;
-  const d = daysFromToday(dueDate);
+/**
+ * The one badge that describes when a task is due.
+ *
+ * A task can legitimately have no date. A class deadline often gets announced
+ * before the teacher fixes the date, and a personal reminder may never need
+ * one. Those two read differently to a student, so they are worded
+ * differently, and neither is left blank: a card with no date badge at all
+ * looks like the app forgot something.
+ */
+export function dueBadge(task) {
+  if (!task?.dueDate) {
+    return task?.source === 'class'
+      ? { text: 'Date not announced yet', tone: '' }
+      : { text: 'No date', tone: '' };
+  }
+  const d = daysFromToday(task.dueDate);
   if (d == null) return null;
-  const pretty = (fmt) => format(new Date(`${dueDate}T00:00:00`), fmt);
+  const pretty = (fmt) => format(new Date(`${task.dueDate}T00:00:00`), fmt);
 
-  if (completed) return { text: pretty('MMM d'), tone: '' };
+  if (task.completed) return { text: pretty('MMM d'), tone: '' };
   if (d < 0) return { text: d === -1 ? 'Overdue 1 day' : `Overdue ${-d} days`, tone: 'badge-danger' };
   if (d === 0) return { text: 'Due today', tone: 'badge-danger' };
   if (d === 1) return { text: 'Due tomorrow', tone: 'badge-warning' };

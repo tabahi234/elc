@@ -111,12 +111,16 @@ const LINK_HOSTS = {
 };
 
 export function vLink(value, kind) {
+  if (value != null && typeof value !== 'string') return 'That is not a valid link.';
+  if (typeof value === 'string' && /[\s\\]/.test(value)) return 'Links cannot contain spaces or backslashes.';
   const v = clean(value);
   if (!v) return null; // clearing a link is always allowed
   const spec = LINK_HOSTS[kind];
+  if (!spec) return 'Unknown link type.';
   let url;
   try { url = new URL(v); } catch { return 'That is not a valid link.'; }
   if (url.protocol !== 'https:') return 'Links must start with https://';
+  if (url.username || url.password || url.port) return 'Use a link without login details or a custom port.';
   if (!spec.hosts.includes(url.hostname)) {
     return `${spec.label} links must be on ${spec.hosts.join(' or ')}.`;
   }
@@ -138,6 +142,8 @@ export function vDueDate(value, { required = true } = {}) {
   const v = clean(value);
   if (!v) return required ? 'Pick a due date.' : null;
   if (!ISO_DATE.test(v)) return 'Use a real date.';
+  const parsed = new Date(`${v}T12:00:00`);
+  if (Number.isNaN(parsed.getTime()) || format(parsed, 'yyyy-MM-dd') !== v) return 'Use a real date.';
   const d = daysFromToday(v);
   if (d == null || Number.isNaN(new Date(`${v}T00:00:00`).getTime())) return 'Use a real date.';
   if (d < -LIMITS.dueWindow.past) return 'That date is over a year ago.';
@@ -266,18 +272,7 @@ export function vGradebook(components) {
   return { rows, hasErrors, totalWeight, warning };
 }
 
-// ── attendance ───────────────────────────────────────────────────────────────
-export function vAttendanceMark(current, { present, expectedSessions }) {
-  const held = (current?.held || 0) + 1;
-  const attended = (current?.attended || 0) + (present ? 1 : 0);
-  if (attended > held) return { error: 'Attended cannot exceed classes held.' };
-  // A few extra over the semester plan is normal (make-up classes); double is not.
-  if (expectedSessions && held > expectedSessions + 6) {
-    return { error: `You have already marked ${held - 1} classes, more than the ${expectedSessions} this subject holds all semester.` };
-  }
-  return {};
-}
-
+// ── marks bookkeeping ────────────────────────────────────────────────────────
 export function vCredits(value) {
   if (!isFiniteNumber(value)) return 'Credits must be a number.';
   const n = Number(value);
@@ -399,29 +394,86 @@ export function vTask(task, { requireDueDate = true } = {}) {
 
 export const hasErrors = (errors) => Object.values(errors || {}).some(Boolean);
 
-// ── attendance sessions ──────────────────────────────────────────────────────
-export const SESSION_STATUS = ['held', 'cancelled'];
 
-/** One class the CR is recording as having happened (or been cancelled). */
-export function vSession(session, existing = []) {
+// ── one-off class changes ────────────────────────────────────────────────────
+/**
+ * The weekly timetable says what normally happens. This says what happens
+ * instead, on one named date: a class called off, moved to another time or
+ * room, or an extra one added.
+ *
+ * `cancelled` and `moved` hang off an existing slot, so they carry its id.
+ * `extra` has no recurring slot behind it, so it carries everything itself.
+ */
+export const CHANGE_STATUS = ['cancelled', 'moved', 'extra'];
+
+export function vClassChange(change, existing = []) {
   const errors = {};
-  if (!session.code) errors.code = 'Pick a subject.';
-  const date = vDueDate(session.date, { required: true });
+
+  const date = vDueDate(change.date, { required: true });
   if (date) errors.date = date;
-  else if (daysFromToday(session.date) > 0) {
-    // Recording a class before it has happened defeats the point: the whole
-    // reason this exists is that the count has to reflect reality.
-    errors.date = 'You cannot record a class that has not happened yet.';
+
+  if (!CHANGE_STATUS.includes(change.status)) errors.status = 'Pick what is happening.';
+  if (!change.code) errors.code = 'Pick a subject.';
+
+  const onASlot = change.status === 'cancelled' || change.status === 'moved';
+  if (onASlot && !change.slotId) errors.slotId = 'Pick which class this is about.';
+
+  // A move and an extra class both need somewhere and sometime to be.
+  if (change.status === 'moved' || change.status === 'extra') {
+    if (!SLOT_TYPES.includes(change.type)) errors.type = 'Pick a class type.';
+
+    const room = vText(change.room, { ...LIMITS.room, label: 'Room' });
+    if (room) errors.room = room;
+
+    const startError = vTime(change.start, { required: true, label: 'Start time' });
+    const endError = vTime(change.end, { required: true, label: 'End time' });
+    if (startError) errors.start = startError;
+    if (endError) errors.end = endError;
+
+    if (!startError && !endError) {
+      const start = toMinutes(change.start);
+      const end = toMinutes(change.end);
+      const span = end - start;
+      if (span <= 0) errors.end = 'It has to end after it starts.';
+      else if (span < LIMITS.slotMinutes.min) errors.end = `A class is at least ${LIMITS.slotMinutes.min} minutes.`;
+      else if (span > LIMITS.slotMinutes.max) errors.end = `That is ${(span / 60).toFixed(1)} hours, longer than any single class (max ${LIMITS.slotMinutes.max / 60}h).`;
+      if (start < toMinutes(LIMITS.dayStart)) errors.start = `Classes do not start before ${LIMITS.dayStart}.`;
+      if (end > toMinutes(LIMITS.dayEnd)) errors.end = `Classes do not run past ${LIMITS.dayEnd}.`;
+    }
   }
-  if (!SESSION_STATUS.includes(session.status)) errors.status = 'Pick held or cancelled.';
-  const note = vOptionalText(session.note, { max: 140, label: 'Note' });
+
+  const note = vOptionalText(change.note, { max: 140, label: 'Note' });
   if (note) errors.note = note;
 
-  // A slot can only be recorded once per day, or the denominator inflates.
-  const clash = existing.find((s) =>
-    s.id !== session.id && s.code === session.code && s.date === session.date &&
-    (s.slotId ?? null) === (session.slotId ?? null));
-  if (clash) errors.date = 'That class on that date is already recorded.';
+  // Two changes to the same class on the same day would contradict each other,
+  // and which one won would come down to document order.
+  if (onASlot && change.slotId && change.date) {
+    const clash = existing.find((c) =>
+      c.id !== change.id && c.date === change.date && c.slotId === change.slotId);
+    if (clash) errors.slotId = 'That class already has a change on that date.';
+  }
+
+  return errors;
+}
+
+// ── announcements ────────────────────────────────────────────────────────────
+/** Anything the CR needs to tell the class that is not itself a deadline. */
+export function vAnnouncement(announcement) {
+  const errors = {};
+
+  const title = vText(announcement.title, { min: 3, max: 120, label: 'Message' });
+  if (title) errors.title = title;
+
+  const body = vOptionalText(announcement.body, { max: LIMITS.note.max, label: 'Details' });
+  if (body) errors.body = body;
+
+  if (announcement.until) {
+    const until = vDueDate(announcement.until, { required: false });
+    if (until) errors.until = until;
+    else if (daysFromToday(announcement.until) < 0) {
+      errors.until = 'That date has already passed, so nobody would ever see this.';
+    }
+  }
 
   return errors;
 }

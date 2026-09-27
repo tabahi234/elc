@@ -8,15 +8,8 @@ const POPUP_TIMEOUT_MS = 90_000;
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(undefined);   // undefined = still checking
-  const [role, setRole] = useState(undefined);   // undefined = still checking
-  // A denied read of the role document is NOT the same thing as "this person is
-  // a student", and treating them the same made a broken deployment look like a
-  // working one. It is tracked separately so the UI can say what went wrong.
-  const [roleError, setRoleError] = useState(null);
-  // Kept exactly as Firestore returned it, purely so the diagnostics panel can
-  // show what is really in the document when it does not match expectations.
-  const [roleRaw, setRoleRaw] = useState(undefined);
-  const [roleDocExists, setRoleDocExists] = useState(undefined);
+  const [roleState, setRoleState] = useState(null);
+  const role = user && roleState?.uid === user.uid ? roleState.role : undefined;
 
   useEffect(() => onAuthStateChanged(auth, setUser, (err) => {
     console.error('Auth error:', err);
@@ -31,62 +24,60 @@ export function AuthProvider({ children }) {
    */
   useEffect(() => {
     if (!user) {
-      setRole(user === null ? null : undefined);
-      setRoleError(null); setRoleRaw(undefined); setRoleDocExists(undefined);
+      setRoleState(null);
       return;
     }
-    return onSnapshot(
+    let active = true;
+    const unsubscribe = onSnapshot(
       doc(db, 'roles', user.uid),
+      { includeMetadataChanges: true },
       (snap) => {
-        setRoleError(null);
-        setRoleDocExists(snap.exists());
+        if (!active || snap.metadata.fromCache) return;
         const raw = snap.exists() ? snap.data().role : undefined;
-        setRoleRaw(raw);
-        // Typed by hand into the Firebase console, so "Admin", "ADMIN" and
-        // "admin " with a stray space all have to mean the same thing. The
-        // rules compare the stored string exactly, so keep the console value
-        // lowercase; this only stops the UI disagreeing with the server.
-        const normalised = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
-        // A role document that does not exist means an ordinary student. That
-        // is a successful read, not a failure.
-        setRole(normalised || 'student');
+        // Match the server's exact values and require explicit approval.
+        const normalised = ['admin', 'cr', 'student'].includes(raw) ? raw : null;
+        setRoleState({ uid: user.uid, role: normalised });
       },
       (err) => {
-        // Still fail closed: an unreadable role is never an admin. But record
-        // why, because permission-denied here almost always means the rules in
-        // firestore.rules have not been deployed to this project yet.
+        // Fail closed: an unreadable role is never an admin. The student is
+        // never told about this, because there is nothing they could do with
+        // the information; whoever runs the app gets it in the console.
         console.error('Role lookup failed:', err);
-        setRoleError(err);
-        setRoleRaw(undefined);
-        setRoleDocExists(undefined);
-        setRole('student');
+        if (active) setRoleState({ uid: user.uid, role: null });
       }
     );
+    return () => { active = false; unsubscribe(); };
   }, [user]);
 
   const signIn = async () => {
     // Popup only. Redirect sign-in needs the handler on the same origin as the
     // app, which localhost and most hosts can't do since Chrome blocked
     // third-party storage.
-    const timeout = new Promise((_, reject) =>
-      setTimeout(() => reject(Object.assign(new Error('Sign-in timed out'), { code: 'auth/timeout' })), POPUP_TIMEOUT_MS));
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Object.assign(new Error('Sign-in timed out'), { code: 'auth/timeout' })), POPUP_TIMEOUT_MS);
+    });
     try {
       const result = await Promise.race([signInWithPopup(auth, googleProvider), timeout]);
       setUser(result.user);
     } catch (err) {
       if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') return;
       throw err;
+    } finally {
+      clearTimeout(timer);
     }
   };
 
-  const signOut = () => fbSignOut(auth);
+  const signOut = async () => {
+    await fbSignOut(auth);
+    // Dispose all in-memory Firestore data and pending UI state.
+    window.location.reload();
+  };
 
   const value = {
     user,
     role,
-    roleError,
-    roleRaw,
-    roleDocExists,
+    isMember: ['admin', 'cr', 'student'].includes(role),
     isAdmin: role === 'admin',
     isCR: role === 'cr',
     canManage: role === 'admin' || role === 'cr',

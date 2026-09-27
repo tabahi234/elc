@@ -5,11 +5,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase';
 import { useAuth } from './authContext';
-import {
-  subjects as defaultSubjects,
-  timetable as defaultTimetable,
-  SEMESTER_WEEKS,
-} from '../data/timetable';
+import { subjects as defaultSubjects, timetable as defaultTimetable } from '../data/timetable';
 
 export const ClassDataContext = createContext(null);
 
@@ -33,8 +29,7 @@ async function commit(promise, ms = 4000) {
   let timer;
   const queued = new Promise((resolve) => { timer = setTimeout(() => resolve({ ok: true, queued: true }), ms); });
   try {
-    const result = await Promise.race([promise.then(() => ({ ok: true })), queued]);
-    return result;
+    return await Promise.race([promise.then(() => ({ ok: true })), queued]);
   } catch (error) {
     return { ok: false, error };
   } finally {
@@ -47,18 +42,22 @@ export function ClassDataProvider({ children }) {
   const [remoteSubjects, setRemoteSubjects] = useState(null);
   const [remoteTimetable, setRemoteTimetable] = useState(null);
   const [globalTasks, setGlobalTasks] = useState([]);
-  const [sessions, setSessions] = useState([]);
+  // One-off departures from the weekly timetable, and notices that are not
+  // deadlines. Both are class-wide and both are written only by a manager.
+  const [classChanges, setClassChanges] = useState([]);
+  const [announcements, setAnnouncements] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   useEffect(() => {
     if (!user) {
-      setRemoteSubjects(null); setRemoteTimetable(null); setGlobalTasks([]); setSessions([]);
+      setRemoteSubjects(null); setRemoteTimetable(null); setGlobalTasks([]);
+      setClassChanges([]); setAnnouncements([]);
       setLoading(false);
       return;
     }
     setLoading(true);
-    let pending = 4;
+    let pending = 5;
     const done = () => { if (--pending <= 0) setLoading(false); };
     const fail = (where) => (err) => {
       console.error(`${where} listener:`, err);
@@ -68,6 +67,7 @@ export function ClassDataProvider({ children }) {
 
     const unsubSubjects = onSnapshot(collection(db, 'subjects'), (snap) => {
       setRemoteSubjects(Object.fromEntries(snap.docs.map((d) => [d.id, { code: d.id, ...d.data() }])));
+      setError(null);
       done();
     }, fail('subjects'));
 
@@ -76,20 +76,31 @@ export function ClassDataProvider({ children }) {
       done();
     }, fail('timetable'));
 
-    // Classes the CR has confirmed actually happened. Attendance is measured
-    // against these rather than against a count each student keeps themselves.
-    const unsubSessions = onSnapshot(collection(db, 'sessions'), (snap) => {
-      setSessions(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-      done();
-    }, fail('sessions'));
-
+    // dueDate is nullable: a deadline can be announced before its date is.
+    // Firestore sorts null first, which is what we want here, because "date
+    // not announced" is not the same thing as "a long way off".
     const unsubTasks = onSnapshot(
       query(collection(db, 'globalTasks'), orderBy('dueDate', 'asc')),
       (snap) => { setGlobalTasks(snap.docs.map((d) => ({ id: d.id, ...d.data() }))); done(); },
       fail('globalTasks')
     );
 
-    return () => { unsubSubjects(); unsubTimetable(); unsubSessions(); unsubTasks(); };
+    const unsubChanges = onSnapshot(
+      query(collection(db, 'classChanges'), orderBy('date', 'asc')),
+      (snap) => { setClassChanges(snap.docs.map((d) => ({ id: d.id, ...d.data() }))); done(); },
+      fail('classChanges')
+    );
+
+    const unsubAnnouncements = onSnapshot(
+      query(collection(db, 'announcements'), orderBy('createdAt', 'desc')),
+      (snap) => { setAnnouncements(snap.docs.map((d) => ({ id: d.id, ...d.data() }))); done(); },
+      fail('announcements')
+    );
+
+    return () => {
+      unsubSubjects(); unsubTimetable(); unsubTasks();
+      unsubChanges(); unsubAnnouncements();
+    };
   }, [user]);
 
   /**
@@ -116,10 +127,6 @@ export function ClassDataProvider({ children }) {
     return [...rows].sort((a, b) => (a.day - b.day) || String(a.start).localeCompare(String(b.start)));
   }, [remoteTimetable, usingDefaults]);
 
-  const weeklySessions = useMemo(() => Object.fromEntries(
-    Object.keys(subjects).map((code) => [code, timetable.filter((t) => t.code === code).length || 1])
-  ), [subjects, timetable]);
-
   // ── writes ────────────────────────────────────────────────────────────────
   // Every one of these is also gated in firestore.rules. The `canManage` guard
   // here only avoids a pointless round trip and a scary console error.
@@ -129,7 +136,9 @@ export function ClassDataProvider({ children }) {
   }), [user]);
 
   const guard = () => {
-    if (!canManage) return { ok: false, error: new Error('You do not have permission to change class data.') };
+    if (!canManage) {
+      return { ok: false, error: Object.assign(new Error('Not allowed'), { code: 'permission-denied' }) };
+    }
     return null;
   };
 
@@ -163,66 +172,46 @@ export function ClassDataProvider({ children }) {
     }
     return commit(addDoc(collection(db, 'globalTasks'), {
       ...data,
-      createdAt: new Date().toISOString(),
+      createdAt: serverTimestamp(),
       createdBy: user.uid,
       ...stamp(),
     }));
   }, [stamp, user, canManage]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const saveSession = useCallback((id, data) => {
+  const deleteGlobalTask = useCallback((id) =>
+    guard() ?? commit(deleteDoc(doc(db, 'globalTasks', id))),
+  [canManage]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const saveClassChange = useCallback((id, data) => {
     const blocked = guard();
     if (blocked) return blocked;
     const payload = { ...data, ...stamp() };
     return commit(id
-      ? setDoc(doc(db, 'sessions', id), payload)
-      : addDoc(collection(db, 'sessions'), payload));
+      ? setDoc(doc(db, 'classChanges', id), payload)
+      : addDoc(collection(db, 'classChanges'), payload));
   }, [stamp, canManage]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /**
-   * Record many classes at once, for catching up after a few weeks of not
-   * marking the register.
-   *
-   * Written in chunks because a Firestore batch takes at most 500 operations.
-   * Unlike publishDefaults this can safely batch, since every subject these
-   * sessions reference already exists; the rules only have to look at
-   * committed state, which already contains them.
-   */
-  const bulkRecordSessions = useCallback(async (entries) => {
-    const blocked = guard();
-    if (blocked) return blocked;
-    if (!entries.length) return { ok: true, written: 0 };
-
-    const CHUNK = 400;
-    const meta = { updatedAt: serverTimestamp(), updatedBy: user.uid };
-    let written = 0;
-
-    for (let i = 0; i < entries.length; i += CHUNK) {
-      const batch = writeBatch(db);
-      const slice = entries.slice(i, i + CHUNK);
-      for (const entry of slice) {
-        batch.set(doc(collection(db, 'sessions')), {
-          code: entry.code,
-          date: entry.date,
-          slotId: entry.slotId ?? null,
-          status: 'held',
-          note: '',
-          ...meta,
-        });
-      }
-      const result = await commit(batch.commit(), 20_000);
-      // Report what did land, so a partial failure is not described as none.
-      if (!result.ok) return { ...result, written };
-      written += slice.length;
-    }
-    return { ok: true, written };
-  }, [user, canManage]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const deleteSession = useCallback((id) =>
-    guard() ?? commit(deleteDoc(doc(db, 'sessions', id))),
+  const deleteClassChange = useCallback((id) =>
+    guard() ?? commit(deleteDoc(doc(db, 'classChanges', id))),
   [canManage]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const deleteGlobalTask = useCallback((id) =>
-    guard() ?? commit(deleteDoc(doc(db, 'globalTasks', id))),
+  const saveAnnouncement = useCallback((id, data) => {
+    const blocked = guard();
+    if (blocked) return blocked;
+    if (id) {
+      // createdAt/createdBy are immutable under the rules, so resend them as-is.
+      return commit(setDoc(doc(db, 'announcements', id), { ...data, ...stamp() }));
+    }
+    return commit(addDoc(collection(db, 'announcements'), {
+      ...data,
+      createdAt: serverTimestamp(),
+      createdBy: user.uid,
+      ...stamp(),
+    }));
+  }, [stamp, user, canManage]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const deleteAnnouncement = useCallback((id) =>
+    guard() ?? commit(deleteDoc(doc(db, 'announcements', id))),
   [canManage]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
@@ -262,7 +251,10 @@ export function ClassDataProvider({ children }) {
       // Queued means the subject writes have not reached the server, so the
       // slot writes would be rejected on arrival. Better to stop than to leave
       // half a timetable behind.
-      return { ok: false, error: new Error('You appear to be offline. Publishing needs a connection, because the timetable can only be written after the subjects land. Reconnect and try again.') };
+      return {
+        ok: false,
+        error: new Error('You seem to be offline. Publishing needs a connection, so reconnect and try again.'),
+      };
     }
 
     const slots = writeBatch(db);
@@ -278,12 +270,13 @@ export function ClassDataProvider({ children }) {
   }, [user, canManage]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const value = {
-    subjects, timetable, weeklySessions, globalTasks, sessions,
-    loading, error, usingDefaults, SEMESTER_WEEKS,
+    subjects, timetable, globalTasks, classChanges, announcements,
+    loading, error, usingDefaults,
     saveSubject, deleteSubject,
     saveSlot, deleteSlot,
     saveGlobalTask, deleteGlobalTask,
-    saveSession, deleteSession, bulkRecordSessions,
+    saveClassChange, deleteClassChange,
+    saveAnnouncement, deleteAnnouncement,
     publishDefaults,
   };
 

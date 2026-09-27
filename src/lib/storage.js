@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { doc, onSnapshot, setDoc } from 'firebase/firestore';
+import { doc, onSnapshot, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../firebase';
 import { useAuth } from './authContext';
 
@@ -19,12 +19,12 @@ export function useUserDoc(key, initialValue) {
   const latest = useRef(initialValue);
 
   useEffect(() => {
-    if (!user) return;
     setLoaded(false);
     // Signing in as someone else must not leave the previous account's data on
     // screen while the new snapshot is in flight.
     latest.current = initialValue;
     setValue(initialValue);
+    if (!user) return;
 
     const ref = doc(db, 'users', user.uid, 'data', key);
     return onSnapshot(ref, (snap) => {
@@ -49,7 +49,7 @@ export function useUserDoc(key, initialValue) {
     latest.current = v;
     setValue(v);
     if (!user) return;
-    setDoc(doc(db, 'users', user.uid, 'data', key), { value: v, updatedAt: new Date().toISOString() })
+    setDoc(doc(db, 'users', user.uid, 'data', key), { value: v, updatedAt: serverTimestamp() })
       .catch((err) => console.error(`Save error (${key}):`, err));
   }, [user, key]);
 

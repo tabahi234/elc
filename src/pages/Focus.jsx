@@ -1,8 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Play, Pause, RotateCcw, Coffee, Flame, Plus, Target, ShieldAlert } from 'lucide-react';
+import { format } from 'date-fns';
+import {
+  Play, Pause, RotateCcw, Coffee, Flame, Plus, Target, ShieldAlert, Undo2,
+} from 'lucide-react';
 import { useClassData } from '../lib/classDataContext';
 import { useGradeBook } from '../lib/progress';
-import { useStudyLog, weekMinutes, todayMinutes, streakDays, trimLog } from '../lib/study';
+import {
+  useStudyLog, weekMinutes, todayMinutes, streakDays, trimLog,
+  removeEntry, entriesToday, newEntryId,
+} from '../lib/study';
 import { DEFAULT_COMPONENTS, summarize } from '../lib/grading';
 import { useToast } from '../lib/toastContext';
 import { LIMITS, vStudySession } from '../lib/validate';
@@ -49,21 +55,46 @@ export default function Focus() {
   }, [codes, subject]);
 
   /**
+   * Take a session back out of the log.
+   *
+   * The common case this exists for is picking the wrong subject in the
+   * dropdown and only noticing after the timer has already banked 25 minutes
+   * against it. Without this the only fix was to live with a wrong log, which
+   * then poisons the streak and the "study next" suggestion.
+   */
+  const unlog = useCallback((entry) => {
+    setLog((existing) => removeEntry(existing, entry));
+  }, [setLog]);
+
+  /**
    * The one place study time is written. Every path (the timer finishing, a
    * quick-log chip, the custom entry) goes through here, so the daily caps
-   * cannot be dodged by picking a different button.
+   * cannot be dodged by picking a different button, and every one of them
+   * offers the same undo.
    */
   const logSession = useCallback((minutes, { silent = false } = {}) => {
     const { subject: code, log: currentLog } = latest.current;
-    const entry = { subject: code, minutes: Math.round(minutes), at: new Date().toISOString() };
+    const entry = {
+      id: newEntryId(),
+      subject: code,
+      minutes: Math.round(minutes),
+      at: new Date().toISOString(),
+    };
     const { error, warning } = vStudySession(currentLog, entry);
 
     if (error) { toast.error(error); return false; }
     setLog((existing) => trimLog([...existing, entry]));
-    if (warning) toast.warning(warning);
-    else if (!silent) toast.success(`${entry.minutes} min on ${subjects[code]?.short || code} logged.`);
+
+    const action = {
+      label: 'Undo',
+      onClick: () => { unlog(entry); toast.info('That session was taken back off your log.'); },
+    };
+    if (warning) toast.warning(warning, { action });
+    else if (!silent) {
+      toast.success(`${entry.minutes} min on ${subjects[code]?.short || code} logged.`, { action });
+    }
     return true;
-  }, [setLog, toast, subjects]);
+  }, [setLog, toast, subjects, unlog]);
 
   useEffect(() => {
     if (!running) return;
@@ -104,6 +135,7 @@ export default function Focus() {
   const { totals, all: weekAll } = weekMinutes(log);
   const today = todayMinutes(log);
   const streak = streakDays(log);
+  const loggedToday = entriesToday(log);
   const todaySubject = today.bySubject[subject] || 0;
   const capPct = Math.min(100, (todaySubject / LIMITS.subjectDay.max) * 100);
   const nearCap = todaySubject >= LIMITS.subjectDay.warn;
@@ -151,7 +183,7 @@ export default function Focus() {
         <p className="sr-only" aria-live="polite">{running ? 'Timer running' : 'Timer paused'}</p>
 
         <div style={{ maxWidth: 320, margin: '0 auto' }}>
-          <Field label="Studying">
+          <Field label="Studying" hint={running ? 'Locked while the timer runs.' : undefined}>
             <select value={subject} onChange={(e) => setSubject(e.target.value)} disabled={running}>
               {codes.length === 0 && <option value="">No subjects yet</option>}
               {Object.entries(subjects).map(([code, s]) => (
@@ -178,8 +210,8 @@ export default function Focus() {
         {subject && (
           <div style={{ marginTop: 'var(--s5)', textAlign: 'left' }}>
             <div className="row-between small" style={{ marginBottom: 5 }}>
-              <span className="muted">{current?.short} today</span>
-              <span className={`nums ${nearCap ? '' : 'muted'}`} style={{ color: nearCap ? 'var(--warning)' : undefined }}>
+              <span className="muted truncate">{current?.short} today</span>
+              <span className={`nums ${nearCap ? '' : 'muted'}`} style={{ color: nearCap ? 'var(--warning)' : undefined, flexShrink: 0 }}>
                 {todaySubject} / {LIMITS.subjectDay.max} min
               </span>
             </div>
@@ -209,10 +241,46 @@ export default function Focus() {
             <ShieldAlert size={13} aria-hidden="true" style={{ marginTop: 2, flexShrink: 0 }} />
             Capped at {LIMITS.session.max} minutes a block, {LIMITS.subjectDay.max / 60} hours per subject
             per day and {LIMITS.dayTotal.max / 60} hours overall. A log you cannot trust makes the
-            GPA projection and the "study next" suggestion worthless.
+            GPA projection and the &ldquo;study next&rdquo; suggestion worthless.
           </p>
         </div>
       </section>
+
+      {/* Undo lives in the toast for the few seconds after a mistake, and here
+          for the rest of the day, because people notice the wrong subject long
+          after the toast has gone. */}
+      {loggedToday.length > 0 && (
+        <section className="section">
+          <div className="section-head">
+            <h2 className="section-title">Logged today</h2>
+            <span className="muted small nums">{today.all} min</span>
+          </div>
+          <div className="card card-flush list">
+            {loggedToday.map((entry, i) => (
+              // Entries written before ids existed have nothing unique of
+              // their own, so the position stands in for one.
+              <div key={entry.id ?? `${entry.at}-${i}`} className="list-row" style={{ minHeight: 48 }}>
+                <span
+                  className="entry-dot"
+                  style={{ background: subjects[entry.subject]?.color || 'var(--border-strong)' }}
+                  aria-hidden="true"
+                />
+                <span className="grow truncate small">{subjects[entry.subject]?.short || entry.subject}</span>
+                <span className="muted tiny nums">{format(new Date(entry.at), 'h:mm a')}</span>
+                <span className="badge nums">{entry.minutes} min</span>
+                <button
+                  className="btn-icon btn-icon-sm"
+                  onClick={() => { unlog(entry); toast.info('Removed from today’s log.'); }}
+                  aria-label={`Remove the ${entry.minutes} minute session on ${subjects[entry.subject]?.short || entry.subject}`}
+                  title="Remove this session"
+                >
+                  <Undo2 size={15} aria-hidden="true" />
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <div className="stat-grid" style={{ marginTop: 'var(--s4)' }}>
         <div className="card stat">
@@ -251,7 +319,7 @@ export default function Focus() {
               <div key={code}>
                 <div className="row-between small" style={{ marginBottom: 4 }}>
                   <span className="truncate">{s.short}</span>
-                  <span className="muted nums">{mins} min</span>
+                  <span className="muted nums" style={{ flexShrink: 0 }}>{mins} min</span>
                 </div>
                 <div className="progress">
                   <div style={{ width: `${weekAll ? (mins / peak) * 100 : 0}%`, background: s.color }} />

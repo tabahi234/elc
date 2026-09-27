@@ -2,12 +2,39 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
+
+    <!-- viewport-fit=cover is what makes env(safe-area-inset-*) return real
+         numbers. Without it the bottom navigation sits underneath the home
+         indicator on every iPhone since the X, and the last tab is unreachable. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+
     <title>UniHelper – Semester 3</title>
+    <meta name="description" content="Timetable, class deadlines, grades and a focus timer for FA25-ELC-C." />
+
+    <!-- Two theme colours, so the browser chrome matches whichever theme the
+         phone is in instead of always going dark. -->
+    <meta name="theme-color" content="#f7f8fa" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0b0f14" media="(prefers-color-scheme: dark)" />
+
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <!-- iOS ignores SVG icons and will screenshot the page instead. -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-title" content="UniHelper" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <!-- "default", not "black-translucent": translucent puts the app's own
+         content under the clock, and every screen would then need its own top
+         inset. With this, iOS reserves the status bar and only the bottom home
+         indicator needs allowing for. -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   </head>
   <body>
     <div id="root"></div>
+    <noscript>
+      This app needs JavaScript. Turn it on in your browser settings, then reload.
+    </noscript>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

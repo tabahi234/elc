@@ -1,21 +1,23 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { format, getDay, parse, isAfter, isBefore } from 'date-fns';
+import { format, parse, isAfter, isBefore } from 'date-fns';
 import {
   Clock, MapPin, User, ChevronRight, AlertTriangle, Flame, GraduationCap,
-  LogOut, Bell, BellOff, Sun, Moon, Monitor, Info, CalendarCheck, PartyPopper, ShieldAlert, Copy,
+  LogOut, Bell, BellOff, Sun, Moon, Monitor, Info, CalendarCheck, PartyPopper,
+  Megaphone, ArrowRightLeft, CalendarPlus,
 } from 'lucide-react';
 import { useAuth } from '../lib/authContext';
 import { useClassData } from '../lib/classDataContext';
-import { useAllTasks, dueLabel } from '../lib/useTasks';
-import { useGradeBook, useCredits, useAttendanceMarks, semesterGpa } from '../lib/progress';
+import { useAllTasks, dueBadge } from '../lib/useTasks';
+import { useGradeBook, useCredits, semesterGpa } from '../lib/progress';
 import { useStudyLog, weekMinutes, streakDays } from '../lib/study';
 import {
   buildAlerts, alertTone, useDeadlineNotifications,
   notificationPermission, requestNotifications, notificationsSupported,
 } from '../lib/alerts';
 import { todayIso } from '../lib/validate';
-import { PROJECT_ID } from '../firebase';
+import { classesOn, nextClass as findNextClass } from '../lib/schedule';
+import { liveAnnouncements } from '../lib/announcements';
 import { useToast } from '../lib/toastContext';
 import { Sheet, EmptyState, CardSkeleton } from '../components/ui';
 
@@ -23,12 +25,11 @@ const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 export default function Dashboard() {
   const [now, setNow] = useState(new Date());
-  const { user, roleError } = useAuth();
-  const { subjects, timetable, weeklySessions, SEMESTER_WEEKS, sessions, loading } = useClassData();
+  const { user } = useAuth();
+  const { subjects, timetable, classChanges, announcements, loading } = useClassData();
   const { tasks } = useAllTasks();
   const [book] = useGradeBook();
   const [credits] = useCredits();
-  const [marks] = useAttendanceMarks();
   const [log] = useStudyLog();
   const [accountOpen, setAccountOpen] = useState(false);
 
@@ -38,23 +39,26 @@ export default function Dashboard() {
   }, []);
 
   // ── next class ───────────────────────────────────────────────────────────
-  const today = getDay(now);
+  // Both of these run through the schedule helper, so a class the CR called
+  // off is never offered as "next" and never sends anyone to an empty room.
+  const todayDate = format(now, 'yyyy-MM-dd');
   const todaysClasses = useMemo(
-    () => timetable.filter((c) => c.day === today),
-    [timetable, today]
+    () => classesOn(todayDate, timetable, classChanges),
+    [todayDate, timetable, classChanges]
   );
 
-  const nextClass = useMemo(() => {
-    const laterToday = timetable.find((c) => c.day === today && isBefore(now, parse(c.end, 'HH:mm', now)));
-    return laterToday
-      ?? timetable.find((c) => c.day > today)
-      ?? timetable[0];
-  }, [timetable, today, now]);
+  const nextClass = useMemo(
+    () => findNextClass(now, timetable, classChanges),
+    [now, timetable, classChanges]
+  );
+
+  const notices = useMemo(() => liveAnnouncements(announcements), [announcements]);
 
   // ── everything needing attention ─────────────────────────────────────────
-  const alerts = useMemo(() => buildAlerts({
-    tasks, subjects, marks, sessions, weeklySessions, semesterWeeks: SEMESTER_WEEKS, timetable,
-  }), [tasks, subjects, marks, sessions, weeklySessions, SEMESTER_WEEKS, timetable]);
+  const alerts = useMemo(
+    () => buildAlerts({ tasks, subjects, timetable, changes: classChanges }),
+    [tasks, subjects, timetable, classChanges]
+  );
 
   useDeadlineNotifications(tasks, subjects);
 
@@ -78,7 +82,7 @@ export default function Dashboard() {
           className="btn-icon"
           onClick={() => setAccountOpen(true)}
           aria-label="Account and settings"
-          style={{ marginTop: 4 }}
+          style={{ marginTop: 4, flexShrink: 0 }}
         >
           {user.photoURL ? (
             <img
@@ -88,23 +92,6 @@ export default function Dashboard() {
           ) : <User size={19} aria-hidden="true" />}
         </button>
       </header>
-
-      {/* If the role document cannot be read at all, the app has no idea who
-          this person is. Saying nothing makes a broken deployment look like a
-          working one, so it says so here, on the first screen. */}
-      {roleError && (
-        <div className="alert alert-danger" style={{ marginBottom: 'var(--s5)' }}>
-          <ShieldAlert size={16} aria-hidden="true" />
-          <div className="alert-body">
-            <strong>Cannot check your access level.</strong>
-            <p className="small" style={{ marginTop: 3 }}>
-              {roleError.code === 'permission-denied'
-                ? 'The security rules have not been deployed to this Firebase project yet. Run firebase deploy --only firestore:rules, then reload.'
-                : roleError.message}
-            </p>
-          </div>
-        </div>
-      )}
 
       {/* One panel, not one tinted card per alert. Four stacked full-bleed
           cards in four different tints is a lot of chrome for what is a single
@@ -124,13 +111,13 @@ export default function Dashboard() {
             {alerts.slice(0, 5).map((a) => (
               <Link key={a.id} to={a.to} className="list-row list-row-link">
                 {a.severity === 'info'
-                  ? <Info size={16} aria-hidden="true" style={{ color: 'var(--accent)' }} />
-                  : <AlertTriangle size={16} aria-hidden="true" style={{ color: `var(--${alertTone(a.severity)})` }} />}
+                  ? <Info size={16} aria-hidden="true" style={{ color: 'var(--accent)', flexShrink: 0 }} />
+                  : <AlertTriangle size={16} aria-hidden="true" style={{ color: `var(--${alertTone(a.severity)})`, flexShrink: 0 }} />}
                 <div className="grow" style={{ minWidth: 0 }}>
                   <div className="small" style={{ fontWeight: 560 }}>{a.title}</div>
                   {a.detail && <div className="muted tiny truncate" style={{ marginTop: 1 }}>{a.detail}</div>}
                 </div>
-                <ChevronRight size={15} aria-hidden="true" style={{ color: 'var(--text-faint)' }} />
+                <ChevronRight size={15} aria-hidden="true" style={{ color: 'var(--text-faint)', flexShrink: 0 }} />
               </Link>
             ))}
             {alerts.length > 5 && (
@@ -138,6 +125,30 @@ export default function Dashboard() {
                 {alerts.length - 5} more
               </Link>
             )}
+          </div>
+        </section>
+      )}
+
+      {/* Notices sit above the numbers because they are the only thing here
+          that someone else wrote today, and they expire on their own. */}
+      {notices.length > 0 && (
+        <section className="section" style={{ marginTop: 0, marginBottom: 'var(--s5)' }}>
+          <div className="section-head">
+            <h2 className="section-title">From your CR</h2>
+            <span className="muted small">{notices.length}</span>
+          </div>
+          <div className="stack-sm">
+            {notices.slice(0, 4).map((notice) => (
+              <div key={notice.id} className="card card-tight notice row">
+                <Megaphone size={16} aria-hidden="true" className="notice-icon" />
+                <div className="grow" style={{ minWidth: 0 }}>
+                  <div className="small" style={{ fontWeight: 600 }}>{notice.title}</div>
+                  {notice.body && (
+                    <p className="muted small" style={{ marginTop: 3 }}>{notice.body}</p>
+                  )}
+                </div>
+              </div>
+            ))}
           </div>
         </section>
       )}
@@ -162,7 +173,7 @@ export default function Dashboard() {
         </div>
 
         {loading ? <CardSkeleton /> : nextClass ? (
-          <NextClassCard slot={nextClass} subject={subjects[nextClass.code]} now={now} today={today} />
+          <NextClassCard slot={nextClass} subject={subjects[nextClass.code]} now={now} />
         ) : (
           <div className="card">
             <EmptyState icon={CalendarCheck} title="No classes scheduled">
@@ -182,10 +193,19 @@ export default function Dashboard() {
             {todaysClasses.map((c) => {
               const done = isAfter(now, parse(c.end, 'HH:mm', now));
               return (
-                <div key={c.id} className="list-row" style={{ opacity: done ? 0.45 : 1, minHeight: 48 }}>
-                  <span className="nums muted small" style={{ minWidth: 62 }}>{fmt(c.start, now)}</span>
-                  <span className="grow truncate">{subjects[c.code]?.short || c.code}{c.type === 'LAB' ? ' lab' : ''}</span>
-                  <span className="badge">{c.room}</span>
+                <div
+                  key={c.id}
+                  className={`list-row ${c.cancelled ? 'is-cancelled' : ''}`}
+                  style={{ opacity: done && !c.cancelled ? 0.45 : 1, minHeight: 48 }}
+                >
+                  <span className="nums muted small" style={{ minWidth: 62, flexShrink: 0 }}>{fmt(c.start, now)}</span>
+                  <span className="grow truncate">
+                    {subjects[c.code]?.short || c.code}{c.type === 'LAB' ? ' lab' : ''}
+                  </span>
+                  {c.cancelled ? <span className="badge badge-danger">Cancelled</span>
+                    : c.extra ? <span className="badge badge-accent">Extra · {c.room}</span>
+                    : c.movedFrom ? <span className="badge badge-warning">Moved · {c.room}</span>
+                    : <span className="badge">{c.room}</span>}
                 </div>
               );
             })}
@@ -207,7 +227,7 @@ export default function Dashboard() {
         ) : (
           <div className="stack-sm">
             {dueSoon.map((t) => {
-              const due = dueLabel(t.dueDate, false);
+              const due = dueBadge(t);
               return (
                 <Link
                   key={t.id} to="/tasks"
@@ -236,13 +256,15 @@ export default function Dashboard() {
 
 const fmt = (t, ref) => format(parse(t, 'HH:mm', ref), 'h:mm a');
 
-function NextClassCard({ slot, subject, now, today }) {
-  const isToday = slot.day === today;
+function NextClassCard({ slot, subject, now }) {
+  const isToday = slot.daysAway === 0;
   const start = parse(slot.start, 'HH:mm', now);
   const end = parse(slot.end, 'HH:mm', now);
-  const changeLive = slot.changeNote && (!slot.changeUntil || slot.changeUntil >= todayIso());
+  // The rolling note on the recurring slot, which is a different thing from a
+  // one-off change to this particular date.
+  const standingNote = slot.changeNote && (!slot.changeUntil || slot.changeUntil >= todayIso());
 
-  let status = { text: DAYS[slot.day], tone: '' };
+  let status = { text: slot.daysAway === 1 ? 'Tomorrow' : DAYS[slot.day], tone: '' };
   if (isToday) {
     if (isAfter(now, start) && isBefore(now, end)) status = { text: 'Happening now', tone: 'badge-success' };
     else {
@@ -255,7 +277,7 @@ function NextClassCard({ slot, subject, now, today }) {
 
   return (
     <div className="card card-accent" style={{ '--stripe': subject?.color }}>
-      <div className="row-between" style={{ marginBottom: 'var(--s3)' }}>
+      <div className="row-between row-wrap" style={{ marginBottom: 'var(--s3)' }}>
         <span className="badge badge-accent">{slot.code} · {slot.type}</span>
         <span className={`badge ${status.tone}`}>{status.text}</span>
       </div>
@@ -270,7 +292,28 @@ function NextClassCard({ slot, subject, now, today }) {
       </div>
       {subject?.teacher && <span className="icon-row"><User size={15} aria-hidden="true" />{subject.teacher}</span>}
 
-      {changeLive && (
+      {/* A one-off move or an extra session has to be unmissable here: this
+          card is the single thing most students look at before leaving. */}
+      {slot.movedFrom && (
+        <div className="alert alert-warning" style={{ marginTop: 'var(--s3)' }}>
+          <ArrowRightLeft size={15} aria-hidden="true" />
+          <span className="alert-body">
+            Moved for this date only. It was {fmt(slot.movedFrom.start, now)} in {slot.movedFrom.room}.
+            {slot.change?.note ? ` ${slot.change.note}` : ''}
+          </span>
+        </div>
+      )}
+      {slot.extra && (
+        <div className="alert alert-accent" style={{ marginTop: 'var(--s3)' }}>
+          <CalendarPlus size={15} aria-hidden="true" />
+          <span className="alert-body">
+            Extra class, not on the usual timetable.
+            {slot.change?.note ? ` ${slot.change.note}` : ''}
+          </span>
+        </div>
+      )}
+
+      {standingNote && (
         <div className="alert alert-warning" style={{ marginTop: 'var(--s3)' }}>
           <Info size={15} aria-hidden="true" />
           <span>{slot.changeNote}</span>
@@ -293,7 +336,7 @@ function applyTheme(theme) {
 }
 
 function AccountSheet({ open, onClose }) {
-  const { user, role, roleError, roleRaw, roleDocExists, signOut } = useAuth();
+  const { user, role, signOut } = useAuth();
   const toast = useToast();
   const [theme, setTheme] = useState(readTheme);
   const [permission, setPermission] = useState(notificationPermission());
@@ -312,8 +355,8 @@ function AccountSheet({ open, onClose }) {
     <Sheet open={open} onClose={onClose} title="Account" subtitle={user.email}>
       <div className="stack">
         <div className="card card-tight row">
-          <div className="grow">
-            <div style={{ fontWeight: 650 }}>{user.displayName || 'Signed in'}</div>
+          <div className="grow" style={{ minWidth: 0 }}>
+            <div className="truncate" style={{ fontWeight: 650 }}>{user.displayName || 'Signed in'}</div>
             <div className="muted tiny truncate">{user.email}</div>
           </div>
           <span className="badge badge-accent">{role || 'student'}</span>
@@ -361,122 +404,10 @@ function AccountSheet({ open, onClose }) {
 
         <hr className="divider" />
 
-        <AccessDiagnostics
-          user={user}
-          role={role}
-          roleRaw={roleRaw}
-          roleDocExists={roleDocExists}
-          roleError={roleError}
-        />
-
-        <hr className="divider" />
-
         <button className="btn btn-danger btn-block" onClick={signOut}>
           <LogOut size={16} aria-hidden="true" /> Sign out
         </button>
       </div>
     </Sheet>
-  );
-}
-
-/* ---- access diagnostics --------------------------------------------------- */
-/**
- * Shows exactly what the app sees when it looks up your role. Every step that
- * can silently go wrong (wrong document id, wrong field name, wrong casing,
- * rules not published) produces a different line here, so the failure is
- * readable instead of "the tab just is not there".
- *
- * The uid is copyable because the single most common mistake is creating the
- * role document with the console's auto-generated id instead of the uid.
- */
-function AccessDiagnostics({ user, role, roleRaw, roleDocExists, roleError }) {
-  const toast = useToast();
-  const [open, setOpen] = useState(false);
-
-  const copyUid = async () => {
-    try {
-      await navigator.clipboard.writeText(user.uid);
-      toast.success('User ID copied.');
-    } catch {
-      toast.error('Could not copy. Select the ID and copy it by hand.');
-    }
-  };
-
-  let verdict;
-  if (roleError) {
-    verdict = roleError.code === 'permission-denied'
-      ? { tone: 'danger', text: 'Firestore refused the read. The rules in firestore.rules are not published on this project yet.' }
-      : { tone: 'danger', text: `Read failed: ${roleError.message}` };
-  } else if (roleDocExists === false) {
-    verdict = { tone: 'warning', text: 'Rules are fine, but there is no document at roles/<your uid>. Check the document id is the uid below, not an auto-generated one.' };
-  } else if (roleDocExists && !roleRaw) {
-    verdict = { tone: 'warning', text: 'The document exists but has no "role" field. The field name must be exactly role, lowercase.' };
-  } else if (roleDocExists && role !== 'admin' && role !== 'cr') {
-    verdict = { tone: 'warning', text: `The role field says "${roleRaw}". It has to be admin or cr.` };
-  } else if (role === 'admin' || role === 'cr') {
-    verdict = { tone: 'success', text: 'Access confirmed. The Manage tab is in the bottom bar.' };
-  } else {
-    verdict = { tone: 'accent', text: 'Signed in as a student.' };
-  }
-
-  return (
-    <div>
-      <button
-        className="btn btn-ghost btn-block"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-      >
-        <ShieldAlert size={15} aria-hidden="true" />
-        {open ? 'Hide access details' : 'Why can I not see Manage?'}
-      </button>
-
-      {open && (
-        <div className="stack-sm" style={{ marginTop: 'var(--s3)' }}>
-          <div className={`alert alert-${verdict.tone}`}>
-            <Info size={15} aria-hidden="true" />
-            <span className="alert-body">{verdict.text}</span>
-          </div>
-
-          <div className="card card-flush list">
-            <div className="list-row" style={{ minHeight: 44 }}>
-              <span className="grow small muted">Project</span>
-              <span className="small nums">{PROJECT_ID}</span>
-            </div>
-            <div className="list-row" style={{ minHeight: 44 }}>
-              <span className="grow small muted">Role read</span>
-              <span className="small">{roleError ? roleError.code || 'failed' : 'ok'}</span>
-            </div>
-            <div className="list-row" style={{ minHeight: 44 }}>
-              <span className="grow small muted">roles document</span>
-              <span className="small">
-                {roleError ? 'unknown' : roleDocExists ? 'found' : 'not found'}
-              </span>
-            </div>
-            <div className="list-row" style={{ minHeight: 44 }}>
-              <span className="grow small muted">role field</span>
-              <span className="small">{roleRaw === undefined ? 'none' : JSON.stringify(roleRaw)}</span>
-            </div>
-            <div className="list-row" style={{ minHeight: 44 }}>
-              <span className="grow small muted">Signed in as</span>
-              <span className="small truncate" style={{ maxWidth: '55%' }}>{user.email}</span>
-            </div>
-          </div>
-
-          <div className="field">
-            <span className="field-label">Your user ID</span>
-            <div className="row" style={{ gap: 'var(--s2)' }}>
-              <input readOnly value={user.uid} onFocus={(e) => e.target.select()} spellCheck={false} />
-              <button className="btn btn-secondary btn-sm" onClick={copyUid} style={{ flexShrink: 0 }}>
-                <Copy size={14} aria-hidden="true" /> Copy
-              </button>
-            </div>
-            <p className="field-hint">
-              In the Firebase console this must be the document id under the roles
-              collection, with a single field: role = admin.
-            </p>
-          </div>
-        </div>
-      )}
-    </div>
   );
 }

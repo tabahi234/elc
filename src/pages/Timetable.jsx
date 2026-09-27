@@ -3,14 +3,23 @@ import { format, parse, getDay } from 'date-fns';
 import {
   Clock, MapPin, User, Wifi, ExternalLink, FolderOpen, GraduationCap,
   CalendarDays, BookOpen, Info, ChevronRight, CalendarOff,
+  Ban, ArrowRightLeft, CalendarPlus,
 } from 'lucide-react';
 import { useClassData } from '../lib/classDataContext';
-import { useAllTasks, dueLabel } from '../lib/useTasks';
-import { safeLink, todayIso } from '../lib/validate';
+import { useAllTasks, dueBadge } from '../lib/useTasks';
+import { safeLink, todayIso, daysFromToday } from '../lib/validate';
+import { upcomingChanges, describeChange } from '../lib/schedule';
 import { Sheet, EmptyState, Tabs, CardSkeleton } from '../components/ui';
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const fmt = (t) => format(parse(t, 'HH:mm', new Date()), 'h:mm a');
+
+/** "Tuesday", "Tuesday and Friday", "Tuesday, Friday and Sunday". */
+function listDays(days) {
+  const names = days.map((d) => DAYS[d]);
+  if (names.length <= 1) return names.join('');
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
 
 export default function Timetable() {
   const [tab, setTab] = useState('week');
@@ -54,8 +63,9 @@ export default function Timetable() {
 /* ── week view ─────────────────────────────────────────────────────────────── */
 
 function WeekView({ onOpenSubject }) {
-  const { subjects, timetable } = useClassData();
+  const { subjects, timetable, classChanges } = useClassData();
   const today = getDay(new Date());
+  const changes = upcomingChanges(classChanges, 21);
 
   const byDay = useMemo(() => {
     const groups = {};
@@ -79,6 +89,40 @@ function WeekView({ onOpenSubject }) {
 
   return (
     <div className="stack">
+      {/* The grid below is the pattern. This is where it is not true. It goes
+          first because a cancelled class is the one thing on this page that
+          changes what a student does today. */}
+      {changes.length > 0 && (
+        <section className="card card-flush" aria-label="Changes to the normal timetable">
+          <div className="row-between" style={{ padding: 'var(--s3) var(--s4)', borderBottom: '1px solid var(--border)' }}>
+            <h2 className="section-title">Not running as usual</h2>
+            <span className="badge badge-warning">{changes.length}</span>
+          </div>
+          <div className="list">
+            {changes.map((change) => {
+              const { headline, detail, tone } = describeChange(change, subjects, timetable);
+              const Icon = change.status === 'cancelled' ? Ban
+                : change.status === 'moved' ? ArrowRightLeft : CalendarPlus;
+              const away = daysFromToday(change.date);
+              return (
+                <div key={change.id} className="list-row" style={{ alignItems: 'flex-start' }}>
+                  <Icon size={16} aria-hidden="true" style={{ color: `var(--${tone})`, flexShrink: 0, marginTop: 2 }} />
+                  <div className="grow" style={{ minWidth: 0 }}>
+                    <div className="small" style={{ fontWeight: 560 }}>{headline}</div>
+                    {(change.note || detail) && (
+                      <div className="muted tiny" style={{ marginTop: 2 }}>{change.note || detail}</div>
+                    )}
+                  </div>
+                  <span className="badge" style={{ flexShrink: 0 }}>
+                    {away === 0 ? 'Today' : away === 1 ? 'Tomorrow' : `${away}d`}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
       {DAYS.map((dayName, day) => {
         const slots = byDay[day];
         if (!slots?.length) return null;
@@ -120,7 +164,7 @@ function WeekView({ onOpenSubject }) {
 
       {freeDays.length > 0 && (
         <p className="muted small center" style={{ marginTop: 'var(--s3)' }}>
-          No classes on {freeDays.map((d) => DAYS[d]).join(', ')} and are free for revision.
+          No classes on {listDays(freeDays)}. Good days to catch up.
         </p>
       )}
     </div>
@@ -224,9 +268,13 @@ function SubjectSheet({ code, subject, onClose }) {
           <div className="icon-row"><User size={15} aria-hidden="true" />{subject.teacher}</div>
         )}
 
-        <div>
-          <p className="field-label" style={{ marginBottom: 8 }}>Course links</p>
-          {drive || classroom ? (
+        {/* Not every course has a Drive folder or a Classroom, and plenty
+            never will. An empty section with a note telling the student to go
+            and ask someone is a chore the app invented; when there is nothing
+            to link to, there is simply nothing here. */}
+        {(drive || classroom) && (
+          <div>
+            <p className="field-label" style={{ marginBottom: 8 }}>Course links</p>
             <div className="stack-sm">
               {drive && (
                 <a href={drive} target="_blank" rel="noreferrer noopener" className="btn btn-secondary btn-block">
@@ -243,12 +291,8 @@ function SubjectSheet({ code, subject, onClose }) {
                 </a>
               )}
             </div>
-          ) : (
-            <p className="field-hint">
-              No links yet. Ask your CR to add the Drive folder and Classroom for this subject.
-            </p>
-          )}
-        </div>
+          </div>
+        )}
 
         {slots.length > 0 && (
           <div>
@@ -272,7 +316,7 @@ function SubjectSheet({ code, subject, onClose }) {
           ) : (
             <div className="stack-sm">
               {upcoming.map((t) => {
-                const due = dueLabel(t.dueDate, false);
+                const due = dueBadge(t);
                 return (
                   <div key={t.id} className="card card-tight row">
                     <div className="grow" style={{ minWidth: 0 }}>

@@ -2,14 +2,20 @@ import React, { useState } from 'react';
 import { ShieldCheck, Check } from 'lucide-react';
 import { useAuth } from '../lib/authContext';
 import { CONSENT_VERSION, LAST_UPDATED, PRIVACY, TERMS } from '../lib/legal';
+import { Sheet } from './ui';
 
 /**
- * Sits between signing in and using the app. Nothing else renders until the
- * person has agreed, and the record stores which version they saw, so changing
- * the text later does not silently inherit an old consent.
+ * Re-consent, for the one case that the sign-in screen cannot cover.
  *
- * Both documents are short enough to read in place. Hiding them behind a link
- * would be the standard move and also the one nobody ever clicks.
+ * Agreement is normally given before signing in, by the tick box on the sign-in
+ * card. This screen is what an already signed-in session gets when the wording
+ * changes underneath it: their stored consent names an older CONSENT_VERSION,
+ * and agreement to an older text is not agreement to this one. They never saw
+ * a sign-in screen to tick, so they are asked here instead.
+ *
+ * Both documents are short enough to read in place, because at this point the
+ * person is being interrupted and deserves to see what changed without
+ * chasing a link.
  */
 export default function Consent({ onAccept }) {
   const { user, signOut } = useAuth();
@@ -29,9 +35,9 @@ export default function Consent({ onAccept }) {
           <ShieldCheck size={24} aria-hidden="true" />
         </div>
 
-        <h1 className="page-title">Before you start</h1>
+        <h1 className="page-title">These have changed</h1>
         <p className="muted small" style={{ margin: 'var(--s2) 0 var(--s5)' }}>
-          Signed in as {user.email}. Worth thirty seconds.
+          Signed in as {user.email}. Worth thirty seconds before you carry on.
         </p>
 
         <div className="stack">
@@ -77,6 +83,25 @@ export function PointList({ doc }) {
         {doc.points.map((point) => <li key={point}>{point}</li>)}
       </ul>
     </section>
+  );
+}
+
+/**
+ * The same text in a sheet, for reading from the sign-in card where there is
+ * no router yet and so no /privacy route to send anyone to.
+ */
+export function LegalSheet({ doc, onClose }) {
+  return (
+    <Sheet
+      open
+      onClose={onClose}
+      title={doc.title}
+      subtitle={`Version ${CONSENT_VERSION}, ${LAST_UPDATED}`}
+    >
+      <ul className="point-list">
+        {doc.points.map((point) => <li key={point}>{point}</li>)}
+      </ul>
+    </Sheet>
   );
 }
 

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  CalendarDays, FolderOpen, Users, ClipboardCheck, Timer, GraduationCap,
+  CalendarDays, FolderOpen, Users, Timer, GraduationCap, Megaphone,
   ChevronRight, ChevronLeft, Check,
 } from 'lucide-react';
 
@@ -16,7 +16,12 @@ const STEPS = [
   {
     icon: CalendarDays,
     title: 'Your week, always current',
-    body: 'Classes tells you what is next, which room, and who teaches it. When your class representative moves a room or changes a time, it updates here for everyone. A changed room shows a note until the change expires.',
+    body: 'Classes tells you what is next, which room, and who teaches it. If your representative cancels a class, moves it, or adds an extra one, that date changes here for everyone. A cancelled class is struck through rather than hidden, so you can see it is off instead of wondering where it went.',
+  },
+  {
+    icon: Megaphone,
+    title: 'Notices, not just deadlines',
+    body: 'Bring a calculator, the lab report format changed, the quiz moved. Your representative posts these to the dashboard with a date they expire on, so the board clears itself and what is left on it is still true.',
   },
   {
     icon: FolderOpen,
@@ -26,17 +31,12 @@ const STEPS = [
   {
     icon: Users,
     title: 'Class deadlines and your own',
-    body: 'Anything your representative announces appears on your list automatically, marked Class. You can tick it off. If you want to reword it, move the date, or add your own notes, tap the copy icon to make a private version you control. If the class version changes later, you will be told.',
-  },
-  {
-    icon: ClipboardCheck,
-    title: 'Attendance you can trust',
-    body: 'Your representative records which classes actually went ahead, so nobody has to guess the total. You just answer Present or Absent for each one. Below 80 percent you can be barred from the final, so the app warns you early and tells you how many you can still miss.',
+    body: 'Anything your representative announces appears on your list automatically, marked Class. You can tick it off. Some arrive before the date is fixed and say so until it is. If you want to reword one, move the date, or add your own notes, tap the copy icon to make a private version you control, and you will be told if the class version changes later.',
   },
   {
     icon: Timer,
     title: 'Focus, and an honest log',
-    body: 'A 25 minute timer that logs the session against a subject. It suggests whichever subject has your weakest projection and the least time this week. It also refuses impossible entries, because a study log you cannot trust is worse than no log.',
+    body: 'A 25 minute timer that logs the session against a subject. It suggests whichever subject has your weakest projection and the least time this week. Logged the wrong one? Tap Undo on the confirmation, or remove it from the list of today’s sessions at any point.',
   },
   {
     icon: GraduationCap,

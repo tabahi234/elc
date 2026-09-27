@@ -17,8 +17,6 @@ export const subjects = {
   MTH241: { title: "Ordinary Differential Equation",     short: "ODE",              teacher: "Prof. Dr. Muhammad Younas",     credits: 3, color: "#cfa153" }
 };
 
-export const subjectName = (code) => subjects[code]?.title || code;
-
 // Days: 0 = Sun, 1 = Mon, 2 = Tue, 3 = Wed, 4 = Thu, 5 = Fri, 6 = Sat
 export const timetable = [
   // Monday. Psychology is published as two back-to-back one-hour cells rather
@@ -43,12 +41,3 @@ export const timetable = [
   { day: 6, start: "10:00", end: "11:30", code: "MTH103", room: "O-3",   type: "Lecture" },
   { day: 6, start: "11:30", end: "14:30", code: "CSC241", room: "C-1",   type: "LAB" }
 ];
-
-// Sessions per week per subject, used for the attendance projection.
-// HUM162 is online with no fixed slot, so it counts as one.
-export const weeklySessions = Object.keys(subjects).reduce((acc, code) => {
-  acc[code] = timetable.filter(t => t.code === code).length || 1;
-  return acc;
-}, {});
-
-export const SEMESTER_WEEKS = 16;

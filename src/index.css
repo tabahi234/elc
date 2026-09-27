@@ -182,9 +182,17 @@ a { color: var(--accent); }
 .app-shell {
   max-width: 640px;
   margin: 0 auto;
-  padding: var(--s5) var(--s4)
-           calc(var(--nav-h) + var(--s6) + env(safe-area-inset-bottom));
+  /* The side padding also respects the notch cut-outs in landscape, where
+     env(safe-area-inset-left/right) is non-zero on every modern iPhone. */
+  padding:
+    var(--s5)
+    max(var(--s4), env(safe-area-inset-right))
+    calc(var(--nav-h) + var(--s6) + env(safe-area-inset-bottom))
+    max(var(--s4), env(safe-area-inset-left));
   min-height: 100dvh;
+}
+@media (max-width: 360px) {
+  .app-shell { padding-left: max(var(--s3), env(safe-area-inset-left)); padding-right: max(var(--s3), env(safe-area-inset-right)); }
 }
 
 .page-header { margin-bottom: var(--s5); }
@@ -213,7 +221,6 @@ h3 { font-size: var(--fs-h2); font-weight: 600; letter-spacing: -0.008em; }
 .truncate  { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .muted { color: var(--text-muted); }
-.faint { color: var(--text-muted); }
 .small { font-size: var(--fs-sm); }
 .tiny  { font-size: var(--fs-xs); }
 .center { text-align: center; }
@@ -839,3 +846,200 @@ svg[class*='lucide'] { stroke-width: 1.75; }
   border-radius: var(--r-full);
   background: var(--border-strong);
 }
+
+/* ---- recovery screens (crash, not found) ----------------------------------- */
+/* Deliberately quiet. A student who hits one of these has already had
+   something go wrong; a red alarm on top of that is not help. */
+.recover-wrap {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: var(--s6) max(var(--s4), env(safe-area-inset-left))
+           calc(var(--s6) + env(safe-area-inset-bottom))
+           max(var(--s4), env(safe-area-inset-right));
+  min-height: 100dvh;
+  display: grid;
+  align-content: center;
+}
+.recover { text-align: center; padding: var(--s5) var(--s4); }
+.recover-icon {
+  width: 46px; height: 46px;
+  margin: 0 auto var(--s4);
+  border-radius: var(--r-full);
+  background: var(--warning-soft);
+  color: var(--warning);
+  display: grid; place-items: center;
+}
+.recover-title { font-size: var(--fs-h1); font-weight: 620; letter-spacing: -0.014em; }
+.recover-text {
+  margin-top: var(--s2);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+.recover-actions {
+  display: flex; flex-wrap: wrap; gap: var(--s2);
+  justify-content: center;
+  margin-top: var(--s5);
+}
+.recover-actions .btn { flex: 1 1 150px; }
+
+/* ---- offline bar ----------------------------------------------------------- */
+/* Sits above the content rather than floating over it, so it never covers a
+   control, and the layout below simply moves down while it is there. */
+.offline-bar {
+  position: sticky;
+  top: 0;
+  z-index: 70;
+  display: flex; align-items: center; gap: var(--s2);
+  padding: calc(var(--s2) + env(safe-area-inset-top)) var(--s4) var(--s2);
+  background: var(--warning-soft);
+  color: var(--warning);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-xs);
+  line-height: 1.35;
+}
+.offline-bar svg { flex-shrink: 0; }
+
+/* ---- study log entry ------------------------------------------------------- */
+.entry-dot {
+  width: 9px; height: 9px;
+  border-radius: var(--r-full);
+  flex-shrink: 0;
+}
+
+/* ---- toast action ---------------------------------------------------------- */
+/* The undo button, so it is a real 34px target and never squeezed out by a
+   long message. */
+.toast-action { flex-shrink: 0; align-self: center; }
+
+/* ============================================================================
+   SMALL SCREENS
+
+   The narrowest phone still in use is 320 CSS pixels (iPhone SE 1st gen, and
+   Android split-screen). Everything below is about that width, plus landscape,
+   where the viewport is short rather than narrow.
+   ============================================================================ */
+
+/* Six navigation items at 320px give each one about 52px. "Classes" at the
+   normal label size does not fit, so the label shrinks rather than wrapping
+   into a second line that pushes the icon off-centre. */
+.nav-item { min-width: 0; padding: 0 2px; }
+.nav-item span:not(.sr-only):not(.nav-count) {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 380px) {
+  .nav { gap: 0; }
+  .nav-item { font-size: 10px; letter-spacing: -0.01em; }
+}
+
+/* In landscape a 62px bar plus a sheet is most of the screen, so the bar gets
+   shorter and the labels drop out entirely; the icons still carry it. */
+@media (orientation: landscape) and (max-height: 460px) {
+  :root { --nav-h: 48px; }
+  .nav-item span:not(.sr-only):not(.nav-count) { display: none; }
+  .sheet { max-height: 96dvh; }
+  .timer-ring { width: min(160px, 34vh); }
+}
+
+/* The gradebook row is five controls across. Below 380px that leaves the
+   component name unusably narrow (about five characters), so the row folds:
+   the name and its delete button take the first line, the three numbers the
+   second. The heading folds with them and keeps sitting over the columns it
+   names, so "15 / 28 / 30" never turns into three anonymous boxes. */
+@media (max-width: 380px) {
+  .comp-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) 34px;
+    gap: 5px;
+  }
+  .comp-row .comp-name { grid-column: 1 / 4; grid-row: 1; }
+  .comp-row > .btn-icon { grid-column: 4; grid-row: 1; align-self: center; margin-top: 0; }
+  .comp-row > input[type='number'] { grid-row: 2; }
+  .comp-head > :first-child { display: none; }
+  .comp-row input { padding: 6px 8px; }
+}
+
+/* Three "what you need for an A" chips at 320px are 78px wide, which clips
+   "already safe". Two columns reads better than three cramped ones. */
+@media (max-width: 360px) {
+  .need-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* A long email or subject title must never widen the page. */
+.page-title, .empty-text, .recover-text, .alert-body, .toast-text, .tour-text {
+  overflow-wrap: anywhere;
+}
+
+/* Tap targets: the two-column form grid collapses before the inputs get too
+   narrow to hit accurately, which is earlier than the old 420px. */
+@media (max-width: 460px) {
+  .field-grid { grid-template-columns: 1fr; }
+}
+
+/* Anything that hangs off the bottom has to clear the navigation bar AND the
+   home indicator, or it sits half under both. */
+.toast-stack, .install-card {
+  width: min(560px, calc(100vw - var(--s5)));
+  max-width: calc(100vw - var(--s5));
+}
+
+/* ---- CR notices ------------------------------------------------------------ */
+/* Tinted, but only just. These are things somebody needs to read, not things
+   that have gone wrong, so they must not compete with the danger and warning
+   states directly above them on the dashboard. */
+.notice {
+  align-items: flex-start;
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+.notice-icon { color: var(--accent); flex-shrink: 0; margin-top: 2px; }
+
+/* ---- a class that is not happening ----------------------------------------- */
+/* Struck through rather than removed. A student who was expecting the class
+   needs to see that it is off; a gap where it used to be reads as a bug. */
+.list-row.is-cancelled .truncate,
+.list-row.is-cancelled .nums {
+  text-decoration: line-through;
+  color: var(--text-faint);
+}
+
+/* ---- inline link inside a sentence ----------------------------------------- */
+/* A button, not an anchor: it opens a sheet rather than navigating, and the
+   sign-in screen renders before the router exists. It has to read as a link
+   anyway, because that is what makes anyone tap it. */
+.link-button {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--accent);
+  font-weight: 560;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.link-button:hover { text-decoration-thickness: 2px; }
+
+/* ---- agreement row on the sign-in card ------------------------------------- */
+/* Left aligned inside a centred card. A two-line sentence centred under a
+   checkbox has a ragged left edge and is measurably slower to read. */
+.consent-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  text-align: left;
+  margin: var(--s5) 0 var(--s4);
+}
+.consent-row input[type='checkbox'] {
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.consent-text { line-height: 1.5; }
+.consent-text label { cursor: pointer; }
