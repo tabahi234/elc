@@ -1,11 +1,242 @@
 rules_version = '2';
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  UniHelper security rules
+//
+//  Threat model: every reader is a signed-in classmate. They can open the
+//  browser console and call the Firestore SDK directly, so NOTHING may be
+//  enforced only in the React code. Anything a student must not do is denied
+//  here.
+//
+//  Roles live in /roles/{uid}. A user's own role doc is readable by them but
+//  writable only by an admin, and the 'admin' role itself can only ever be
+//  granted from the Firebase console (or Admin SDK) — see /roles below. That
+//  makes privilege escalation from the client impossible.
+//
+//  Bootstrapping the first admin (one time, Firebase console → Firestore):
+//      collection: roles   document id: <your-uid>   { role: "admin" }
+//  Find your uid in Firebase console → Authentication → Users.
+// ─────────────────────────────────────────────────────────────────────────────
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Each signed-in user can only read/write their own subtree.
-    match /users/{uid}/{document=**} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+
+    // ── identity ────────────────────────────────────────────────────────────
+    function signedIn() {
+      return request.auth != null
+          && request.auth.token.email_verified == true;
     }
-    // Everything else is locked.
+
+    function roleDoc(uid) {
+      return get(/databases/$(database)/documents/roles/$(uid));
+    }
+    function roleOf(uid) {
+      return exists(/databases/$(database)/documents/roles/$(uid))
+           ? roleDoc(uid).data.role
+           : 'student';
+    }
+    function isAdmin()  { return signedIn() && roleOf(request.auth.uid) == 'admin'; }
+    function isCR()     { return signedIn() && roleOf(request.auth.uid) == 'cr'; }
+    // CR = class representative. Can manage class content, cannot manage people.
+    function manages()  { return isAdmin() || isCR(); }
+
+    // ── shared field validators ─────────────────────────────────────────────
+    function str(v, lo, hi) {
+      return v is string && v.size() >= lo && v.size() <= hi;
+    }
+    function intIn(v, lo, hi) {
+      return v is int && v >= lo && v <= hi;
+    }
+    // A link is either cleared ('') or an https URL on an allow-listed host.
+    // Blocks javascript:, data:, http: and look-alike domains.
+    function driveUrl(v) {
+      return v is string && v.size() <= 500
+          && (v == '' || v.matches('^https://(drive|docs)[.]google[.]com/[^ ]*$'));
+    }
+    function classroomUrl(v) {
+      return v is string && v.size() <= 500
+          && (v == '' || v.matches('^https://classroom[.]google[.]com/[^ ]*$'));
+    }
+    function hhmm(v)      { return v is string && v.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$'); }
+    // Years are clamped to 2025-2035 so nobody can park a task in the year 9999.
+    function isoDate(v)   { return v is string && v.matches('^20(2[5-9]|3[0-5])-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'); }
+    function hexColor(v)  { return v is string && v.matches('^#[0-9a-fA-F]{6}$'); }
+    function subjectCode(v) { return v is string && v.matches('^[A-Z]{2,4}[0-9]{3}$'); }
+    function subjectExists(code) {
+      return exists(/databases/$(database)/documents/subjects/$(code));
+    }
+    // Every class-content write is stamped with its real author, and the
+    // author cannot be forged because it is compared to the auth token.
+    function stamped() {
+      return request.resource.data.updatedBy == request.auth.uid
+          && request.resource.data.updatedAt == request.time;
+    }
+
+    // ── /roles/{uid} — who may manage class content ─────────────────────────
+    match /roles/{uid} {
+      // You may always read your own role; managers may read any (to show names).
+      allow get:  if signedIn() && (request.auth.uid == uid || manages());
+      allow list: if isAdmin();
+
+      function validRole() {
+        return request.resource.data.keys().hasOnly(['role', 'email', 'updatedAt', 'updatedBy'])
+            // 'admin' is deliberately NOT grantable from the client.
+            && request.resource.data.role in ['cr', 'student']
+            && str(request.resource.data.email, 3, 200)
+            && stamped();
+      }
+      // An admin can appoint or demote a CR, but never touches their own doc
+      // and never edits another admin — so the admin set can only change from
+      // the Firebase console.
+      allow create: if isAdmin() && uid != request.auth.uid && validRole();
+      allow update: if isAdmin() && uid != request.auth.uid && validRole()
+                    && resource.data.role != 'admin';
+      allow delete: if isAdmin() && uid != request.auth.uid
+                    && resource.data.role != 'admin';
+    }
+
+    // ── /subjects/{code} — one doc per course ───────────────────────────────
+    match /subjects/{code} {
+      allow read: if signedIn();
+
+      function validSubject() {
+        let d = request.resource.data;
+        return subjectCode(code)
+            && d.keys().hasOnly(['title','short','teacher','credits','color',
+                                 'online','driveLink','classroomLink','order',
+                                 'updatedAt','updatedBy'])
+            && d.keys().hasAll(['title','short','credits','color'])
+            && str(d.title, 2, 80)
+            && str(d.short, 1, 24)
+            && (!('teacher' in d) || str(d.teacher, 0, 80))
+            && intIn(d.credits, 0, 6)
+            && hexColor(d.color)
+            && (!('online' in d) || d.online is bool)
+            && (!('order' in d) || intIn(d.order, 0, 99))
+            && (!('driveLink' in d) || driveUrl(d.driveLink))
+            && (!('classroomLink' in d) || classroomUrl(d.classroomLink))
+            && stamped();
+      }
+      allow create, update: if manages() && validSubject();
+      allow delete:         if isAdmin();
+    }
+
+    // ── /timetable/{slotId} — one doc per weekly class slot ─────────────────
+    match /timetable/{slotId} {
+      allow read: if signedIn();
+
+      function validSlot() {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['day','start','end','code','room','type',
+                                 'changeNote','changeUntil','updatedAt','updatedBy'])
+            && d.keys().hasAll(['day','start','end','code','room','type'])
+            && intIn(d.day, 0, 6)
+            && hhmm(d.start) && hhmm(d.end)
+            // Zero-padded HH:MM compares correctly as a string.
+            && d.end > d.start
+            && subjectCode(d.code) && subjectExists(d.code)
+            && str(d.room, 1, 24)
+            && d.type in ['Lecture', 'LAB', 'Tutorial', 'Online']
+            && (!('changeNote' in d)  || str(d.changeNote, 0, 140))
+            && (!('changeUntil' in d) || d.changeUntil == '' || isoDate(d.changeUntil))
+            && stamped();
+      }
+      allow create, update: if manages() && validSlot();
+      allow delete:         if manages();
+    }
+
+    // ── /sessions/{id} — classes the CR confirms actually happened ──────────
+    // The denominator for attendance. A student cannot know how many classes
+    // were held, so only a manager may record them; students mark themselves
+    // present or absent against these, privately, under their own uid.
+    match /sessions/{sessionId} {
+      allow read: if signedIn();
+
+      function validSession() {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['code','date','slotId','status','note',
+                                 'updatedAt','updatedBy'])
+            && d.keys().hasAll(['code','date','status'])
+            && subjectCode(d.code) && subjectExists(d.code)
+            && isoDate(d.date)
+            && d.status in ['held', 'cancelled']
+            && (!('slotId' in d) || d.slotId == null || str(d.slotId, 1, 128))
+            && (!('note' in d) || str(d.note, 0, 140))
+            && stamped();
+      }
+      allow create, update: if manages() && validSession();
+      allow delete:         if manages();
+    }
+
+    // ── /globalTasks/{id} — deadlines broadcast to the whole class ──────────
+    match /globalTasks/{taskId} {
+      allow read: if signedIn();
+
+      function validTask() {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['title','subject','type','dueDate','dueTime',
+                                 'note','createdAt','createdBy','updatedAt','updatedBy'])
+            && d.keys().hasAll(['title','subject','type','dueDate'])
+            && str(d.title, 3, 120)
+            && subjectCode(d.subject) && subjectExists(d.subject)
+            && d.type in ['Assignment','Quiz','Sessional','Final','Lab','Project','Presentation']
+            && isoDate(d.dueDate)
+            && (!('dueTime' in d) || d.dueTime == '' || hhmm(d.dueTime))
+            && (!('note' in d) || str(d.note, 0, 500))
+            && stamped();
+      }
+      allow create: if manages() && validTask()
+                    && request.resource.data.createdBy == request.auth.uid;
+      // createdBy/createdAt are immutable, so authorship can't be rewritten.
+      allow update: if manages() && validTask()
+                    && request.resource.data.createdBy == resource.data.createdBy
+                    && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if manages();
+    }
+
+    // ── /users/{uid} — private per-student data ─────────────────────────────
+    // Only the owner, ever. Not even an admin can read a classmate's grades.
+    match /users/{uid}/data/{key} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow write: if signedIn() && request.auth.uid == uid
+                   && key in ['gradebook','attendance','attendanceMarks','credits',
+                              'profile','studylog','settings','taskState']
+                   && request.resource.data.keys().hasOnly(['value','updatedAt'])
+                   // Caps runaway writes; the client enforces the real limits.
+                   && (!(request.resource.data.value is list)
+                       || request.resource.data.value.size() <= 2000);
+    }
+
+    match /users/{uid}/tasks/{taskId} {
+      allow read: if signedIn() && request.auth.uid == uid;
+
+      function validPersonalTask() {
+        let d = request.resource.data;
+        // sourceTaskId records that this started life as a class deadline the
+        // student adopted. It is only a label on their own private copy; it
+        // grants nothing and is never read back by anyone else.
+        return d.keys().hasOnly(['title','subject','type','dueDate','dueTime',
+                                 'note','completed','createdAt','sourceTaskId',
+                                 'sourceSnapshot'])
+            // A copy of the class version as it stood when adopted, so the UI
+            // can tell the student when the CR has since changed it.
+            && (!('sourceSnapshot' in d) || d.sourceSnapshot == null
+                || d.sourceSnapshot is map)
+            && (!('sourceTaskId' in d) || d.sourceTaskId == null
+                || str(d.sourceTaskId, 1, 128))
+            && str(d.title, 1, 120)
+            && subjectCode(d.subject)
+            && d.type is string && d.type.size() <= 24
+            && (d.dueDate == null || isoDate(d.dueDate))
+            && (!('dueTime' in d) || d.dueTime == '' || hhmm(d.dueTime))
+            && (!('note' in d) || str(d.note, 0, 500))
+            && d.completed is bool;
+      }
+      allow create, update: if signedIn() && request.auth.uid == uid && validPersonalTask();
+      allow delete: if signedIn() && request.auth.uid == uid;
+    }
+
+    // ── everything else is denied ───────────────────────────────────────────
     match /{document=**} {
       allow read, write: if false;
     }

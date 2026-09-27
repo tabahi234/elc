@@ -1,71 +1,220 @@
-import { useEffect, useState } from 'react';
-import { collection, query, orderBy, onSnapshot, addDoc, updateDoc, doc, deleteDoc } from 'firebase/firestore';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { collection, query, orderBy, onSnapshot, addDoc, setDoc, doc, deleteDoc } from 'firebase/firestore';
+import { format } from 'date-fns';
 import { db } from '../firebase';
 import { useAuth } from './authContext';
-import { format } from 'date-fns';
+import { useClassData } from './classDataContext';
+import { useUserDoc } from './storage';
+import { TASK_TYPES, daysFromToday } from './validate';
 
-export const TASK_TYPES = ['Assignment', 'Quiz', 'Sessional', 'Final', 'Lab', 'Project', 'Revision'];
+export { TASK_TYPES };
 
+/**
+ * Personal tasks only. Class-wide deadlines come from ClassDataProvider.
+ */
 export function useTasks() {
   const { user } = useAuth();
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  const col = () => collection(db, 'users', user.uid, 'tasks');
-
   useEffect(() => {
+    if (!user) { setLoading(false); return; }
     const q = query(collection(db, 'users', user.uid, 'tasks'), orderBy('createdAt', 'desc'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      setTasks(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
+    return onSnapshot(q, (snap) => {
+      setTasks(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
       setLoading(false);
       setError(null);
     }, (err) => {
-      console.error('Firestore Error:', err);
+      console.error('Tasks listener:', err);
       setError(err.message);
       setLoading(false);
     });
-    return () => unsubscribe();
-  }, [user.uid]);
+  }, [user]);
 
-  const addTask = (data) => addDoc(col(), {
-    completed: false,
+  const col = useCallback(() => collection(db, 'users', user.uid, 'tasks'), [user]);
+
+  const addTask = useCallback((data) => addDoc(col(), {
+    title: data.title,
+    subject: data.subject,
+    type: data.type,
+    dueDate: data.dueDate || null,
+    dueTime: data.dueTime || '',
+    note: data.note || '',
+    completed: Boolean(data.completed),
     createdAt: new Date().toISOString(),
-    ...data
-  });
-  const toggleTask = (id, completed) => updateDoc(doc(col(), id), { completed: !completed });
-  const deleteTask = (id) => deleteDoc(doc(col(), id));
+    sourceTaskId: data.sourceTaskId || null,
+    sourceSnapshot: data.sourceSnapshot || null,
+  }), [col]);
 
-  return { tasks, loading, error, addTask, toggleTask, deleteTask };
+  const updateTask = useCallback((id, data) =>
+    setDoc(doc(col(), id), data, { merge: true }), [col]);
+
+  const deleteTask = useCallback((id) => deleteDoc(doc(col(), id)), [col]);
+
+  return { tasks, loading, error, addTask, updateTask, deleteTask };
 }
 
-// Sort: incomplete first, then by due date (no due date last), then newest
+/**
+ * Whether the student has ticked off a class-wide deadline.
+ *
+ * The previous version wrote a stub into users/{uid}/tasks under the global
+ * task's id, which produced half-formed task documents that the security rules
+ * now (correctly) reject. Completion is a per-student flag about someone
+ * else's task, so it belongs in the student's own key-value store.
+ */
+export function useGlobalTaskState() {
+  const [state, setState] = useUserDoc('taskState', {});
+
+  const toggle = useCallback((id, done) => {
+    setState((current) => {
+      const next = { ...current };
+      if (done) next[id] = true; else delete next[id];
+      return next;
+    });
+  }, [setState]);
+
+  return [state ?? {}, toggle];
+}
+
+/**
+ * The single list every screen reads: personal tasks and class broadcasts,
+ * merged and sorted. Class tasks are flagged so they can't be deleted by a
+ * student who only wants them off their own list.
+ */
+export function useAllTasks() {
+  const { tasks, loading, error, addTask, updateTask, deleteTask } = useTasks();
+  const { globalTasks } = useClassData();
+  const [globalState, toggleGlobal] = useGlobalTaskState();
+
+  const merged = useMemo(() => {
+    // A class deadline the student has adopted is hidden in its original form,
+    // otherwise they would see the same assignment twice: once read-only and
+    // once as their editable copy.
+    const adopted = new Set(tasks.map((t) => t.sourceTaskId).filter(Boolean));
+    const byId = new Map(globalTasks.map((t) => [t.id, t]));
+    return sortTasks([
+      ...tasks.map((t) => ({
+        ...t,
+        source: 'personal',
+        classUpdate: t.sourceTaskId ? diffAgainstClass(t, byId.get(t.sourceTaskId)) : null,
+      })),
+      ...globalTasks
+        .filter((t) => !adopted.has(t.id))
+        .map((t) => ({ ...t, source: 'class', completed: Boolean(globalState[t.id]) })),
+    ]);
+  }, [tasks, globalTasks, globalState]);
+
+  const toggle = useCallback((task) => {
+    if (task.source === 'class') toggleGlobal(task.id, !task.completed);
+    else updateTask(task.id, { completed: !task.completed });
+  }, [toggleGlobal, updateTask]);
+
+  /**
+   * Take a class deadline and make a private copy the student owns outright.
+   * The class original is untouched, so nothing the student does here can
+   * affect a classmate. The copy carries its completion state across so
+   * adopting something already ticked off does not silently un-tick it.
+   */
+  const adoptTask = useCallback((classTask) => addTask({
+    title: classTask.title,
+    subject: classTask.subject,
+    type: classTask.type,
+    dueDate: classTask.dueDate || null,
+    dueTime: classTask.dueTime || '',
+    note: classTask.note || '',
+    completed: Boolean(globalState[classTask.id]),
+    sourceTaskId: classTask.id,
+    sourceSnapshot: snapshotOf(classTask),
+  }), [addTask, globalState]);
+
+  /**
+   * Pull the CR's later changes into a copy the student already owns. Only the
+   * fields the CR actually changed are touched, so anything the student
+   * personalised and the CR did not touch survives.
+   */
+  const applyClassUpdate = useCallback((task) => {
+    const update = task.classUpdate;
+    if (!update) return Promise.resolve();
+    const patch = {};
+    for (const field of update.fields) patch[field.key] = field.to;
+    return updateTask(task.id, { ...patch, sourceSnapshot: update.snapshot });
+  }, [updateTask]);
+
+  /** Stop tracking the class version without losing the copy. */
+  const dismissClassUpdate = useCallback((task) =>
+    updateTask(task.id, { sourceSnapshot: task.classUpdate?.snapshot ?? null }),
+  [updateTask]);
+
+  return {
+    tasks: merged, loading, error,
+    addTask, updateTask, deleteTask, toggle,
+    adoptTask, applyClassUpdate, dismissClassUpdate,
+  };
+}
+
+const TRACKED = [
+  { key: 'title', label: 'Title' },
+  { key: 'dueDate', label: 'Due date' },
+  { key: 'dueTime', label: 'Due time' },
+  { key: 'type', label: 'Type' },
+  { key: 'note', label: 'Note' },
+];
+
+const snapshotOf = (classTask) => Object.fromEntries(
+  TRACKED.map(({ key }) => [key, classTask[key] ?? null])
+);
+
+/**
+ * What the CR has changed on the class original since this copy was made.
+ *
+ * Comparing against the snapshot taken at adoption time, rather than against
+ * the student's current values, is what makes this safe: a student who renamed
+ * their copy is not told the title "changed" every time they open the app.
+ */
+function diffAgainstClass(personal, classTask) {
+  if (!classTask) return null;                 // the CR deleted it
+  const snapshot = personal.sourceSnapshot;
+  if (!snapshot) return null;                  // adopted before this existed
+
+  const fields = TRACKED
+    .map(({ key, label }) => ({
+      key,
+      label,
+      from: snapshot[key] ?? null,
+      to: classTask[key] ?? null,
+    }))
+    .filter((f) => (f.from ?? '') !== (f.to ?? ''));
+
+  if (!fields.length) return null;
+  return { fields, snapshot: snapshotOf(classTask) };
+}
+
+/** Incomplete first, then soonest due, then newest. */
 export function sortTasks(tasks) {
   return [...tasks].sort((a, b) => {
     if (a.completed !== b.completed) return a.completed ? 1 : -1;
-    if (a.dueDate && b.dueDate) return a.dueDate.localeCompare(b.dueDate);
-    if (a.dueDate) return -1;
-    if (b.dueDate) return 1;
-    return (b.createdAt || '').localeCompare(a.createdAt || '');
+    if (a.dueDate && b.dueDate && a.dueDate !== b.dueDate) return a.dueDate.localeCompare(b.dueDate);
+    if (a.dueDate && !b.dueDate) return -1;
+    if (!a.dueDate && b.dueDate) return 1;
+    return String(b.createdAt || '').localeCompare(String(a.createdAt || ''));
   });
 }
 
-// Days until due (negative = overdue). null if no due date.
-export function daysUntil(dueDate) {
-  if (!dueDate) return null;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const due = new Date(dueDate + 'T00:00:00');
-  return Math.round((due - today) / 86400000);
-}
+export const daysUntil = daysFromToday;
 
+/** Badge text and tone for a due date. */
 export function dueLabel(dueDate, completed) {
-  const d = daysUntil(dueDate);
+  if (!dueDate) return null;
+  const d = daysFromToday(dueDate);
   if (d == null) return null;
-  if (completed) return { text: format(new Date(dueDate + 'T00:00:00'), 'MMM d'), cls: 'badge-primary' };
-  if (d < 0) return { text: `Overdue ${-d}d`, cls: 'badge-danger' };
-  if (d === 0) return { text: 'Due today', cls: 'badge-danger' };
-  if (d === 1) return { text: 'Due tomorrow', cls: 'badge-warning' };
-  if (d <= 3) return { text: `Due in ${d}d`, cls: 'badge-warning' };
-  return { text: format(new Date(dueDate + 'T00:00:00'), 'EEE, MMM d'), cls: 'badge-primary' };
-}
+  const pretty = (fmt) => format(new Date(`${dueDate}T00:00:00`), fmt);
 
+  if (completed) return { text: pretty('MMM d'), tone: '' };
+  if (d < 0) return { text: d === -1 ? 'Overdue 1 day' : `Overdue ${-d} days`, tone: 'badge-danger' };
+  if (d === 0) return { text: 'Due today', tone: 'badge-danger' };
+  if (d === 1) return { text: 'Due tomorrow', tone: 'badge-warning' };
+  if (d <= 3) return { text: `In ${d} days`, tone: 'badge-warning' };
+  if (d <= 7) return { text: pretty('EEEE'), tone: 'badge-accent' };
+  return { text: pretty('MMM d'), tone: '' };
+}

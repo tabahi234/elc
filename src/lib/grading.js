@@ -1,4 +1,10 @@
-// COMSATS absolute grading scale (edit if your department uses a different one)
+// Assumed absolute grading scale. This shipped with the project and has NOT
+// been checked against an official COMSATS document, so treat every letter and
+// GPA derived from it as an estimate. Two ways it can be wrong:
+//   1. the boundaries differ from your handbook, or
+//   2. your department grades relatively, on a curve, in which case a fixed
+//      threshold cannot model the outcome at all.
+// Correct the numbers here and the whole app follows.
 export const GRADE_SCALE = [
   { letter: 'A',  min: 85, points: 4.00 },
   { letter: 'A-', min: 80, points: 3.67 },
@@ -13,7 +19,8 @@ export const GRADE_SCALE = [
   { letter: 'F',  min: 0,  points: 0.00 }
 ];
 
-// Typical COMSATS theory-course breakdown
+// A common theory-course split, used as a starting point. Students can change
+// the weights per subject in the app, and should, against the actual outline.
 export const DEFAULT_COMPONENTS = [
   { name: 'Quizzes',      weight: 15, obtained: '', total: '' },
   { name: 'Assignments',  weight: 10, obtained: '', total: '' },
