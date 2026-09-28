@@ -3,12 +3,16 @@ import { format, parse, getDay } from 'date-fns';
 import {
   Clock, MapPin, User, Wifi, ExternalLink, FolderOpen, GraduationCap,
   CalendarDays, BookOpen, Info, ChevronRight, CalendarOff,
-  Ban, ArrowRightLeft, CalendarPlus,
+  Ban, ArrowRightLeft, CalendarPlus, FileText, Armchair, Building2,
 } from 'lucide-react';
 import { useClassData } from '../lib/classDataContext';
 import { useAllTasks, dueBadge } from '../lib/useTasks';
 import { safeLink, todayIso, daysFromToday } from '../lib/validate';
 import { upcomingChanges, describeChange } from '../lib/schedule';
+import {
+  examModeActive, examModeDates, groupByDate, upcomingExams, pastExams, examCountdown,
+} from '../lib/exams';
+import { CAMPUS_LINKS, EXTERNAL_LINK_PROPS } from '../lib/links';
 import { Sheet, EmptyState, Tabs, CardSkeleton } from '../components/ui';
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -24,20 +28,30 @@ function listDays(days) {
 export default function Timetable() {
   const [tab, setTab] = useState('week');
   const [openSubject, setOpenSubject] = useState(null);
-  const { subjects, loading } = useClassData();
+  const { subjects, exams, examMode, loading } = useClassData();
+
+  // During an exam period the weekly grid is not what is happening, so it
+  // stops being the first thing on the page. It is kept, one tap away, because
+  // "when does the timetable start again" is a real question and deleting the
+  // answer to it would be worse than burying it.
+  const inExams = examModeActive(examMode);
 
   return (
     <div className="animate-in">
       <header className="page-header">
         <p className="page-eyebrow">Fall 2026 · FA25-ELC-C</p>
-        <h1 className="page-title">Your week</h1>
+        <h1 className="page-title">{inExams ? 'Exam schedule' : 'Your week'}</h1>
       </header>
 
       <Tabs
         value={tab}
         onChange={setTab}
         options={[
-          { value: 'week', label: 'Timetable', icon: CalendarDays },
+          {
+            value: 'week',
+            label: inExams ? 'Exams' : 'Timetable',
+            icon: inExams ? FileText : CalendarDays,
+          },
           { value: 'subjects', label: 'Subjects', icon: BookOpen },
         ]}
       />
@@ -45,7 +59,9 @@ export default function Timetable() {
       <div style={{ marginTop: 'var(--s4)' }}>
         {loading ? <div className="stack"><CardSkeleton /><CardSkeleton /></div>
           : tab === 'week'
-            ? <WeekView onOpenSubject={setOpenSubject} />
+            ? (inExams
+              ? <ExamView exams={exams} subjects={subjects} config={examMode} onOpenSubject={setOpenSubject} />
+              : <WeekView onOpenSubject={setOpenSubject} />)
             : <SubjectsView onOpenSubject={setOpenSubject} />}
       </div>
 
@@ -245,6 +261,146 @@ function SubjectsView({ onOpenSubject }) {
         );
       })}
     </div>
+  );
+}
+
+/* ── exam schedule ─────────────────────────────────────────────────────────── */
+
+/**
+ * The exam period, grouped by day.
+ *
+ * Everything here is one question: where do I sit and when. Teachers, course
+ * titles and the usual card furniture are left off, because in an exam week
+ * nobody is reading them and they push the room number below the fold.
+ */
+function ExamView({ exams, subjects, config, onOpenSubject }) {
+  const ahead = upcomingExams(exams);
+  const sat = pastExams(exams);
+  const days = groupByDate(ahead);
+  const span = examModeDates(config);
+
+  return (
+    <div className="stack">
+      <div className="alert alert-warning">
+        <Armchair size={16} aria-hidden="true" />
+        <div className="alert-body">
+          <strong className="small">{config.label || 'Exams'} are on{span ? `, ${span}` : ''}</strong>
+          <p className="small" style={{ marginTop: 2 }}>
+            Normal classes are suspended. The weekly timetable is at the bottom of
+            this page for when they start again.
+          </p>
+        </div>
+      </div>
+
+      {days.length === 0 ? (
+        <div className="card">
+          <EmptyState icon={FileText} title="Nothing published yet">
+            Your class representative has not put the date sheet in yet. Check the
+            student portal in the meantime.
+          </EmptyState>
+        </div>
+      ) : days.map(({ date, sittings }) => (
+        <section key={date}>
+          <div className="section-head">
+            <h2 className="section-title">
+              {format(new Date(`${date}T00:00:00`), 'EEEE d MMMM')}
+            </h2>
+            <span className="muted small">{sittings.length} {sittings.length === 1 ? 'paper' : 'papers'}</span>
+          </div>
+          <div className="stack-sm">
+            {sittings.map((exam) => (
+              <ExamCard key={exam.id} exam={exam} subject={subjects[exam.code]} onOpenSubject={onOpenSubject} />
+            ))}
+          </div>
+        </section>
+      ))}
+
+      {sat.length > 0 && (
+        <details className="card card-tight">
+          <summary className="muted small" style={{ cursor: 'pointer' }}>
+            Already sat ({sat.length})
+          </summary>
+          <div className="stack-sm" style={{ marginTop: 'var(--s3)' }}>
+            {sat.map((exam) => (
+              <div key={exam.id} className="card card-tight row" style={{ opacity: 0.6 }}>
+                <div className="grow" style={{ minWidth: 0 }}>
+                  <div className="truncate small" style={{ fontWeight: 600 }}>
+                    {exam.kind} · {subjects[exam.code]?.short || exam.code}
+                  </div>
+                  <div className="muted tiny">
+                    {format(new Date(`${exam.date}T00:00:00`), 'd MMM')} · {exam.room}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+
+      <div className="card card-flush list">
+        {CAMPUS_LINKS.map((link) => (
+          <a key={link.id} href={link.href} {...EXTERNAL_LINK_PROPS} className="list-row list-row-link">
+            <Building2 size={16} aria-hidden="true" style={{ color: 'var(--accent)', flexShrink: 0 }} />
+            <div className="grow" style={{ minWidth: 0 }}>
+              <div className="small" style={{ fontWeight: 560 }}>{link.label}</div>
+              <div className="muted tiny truncate" style={{ marginTop: 1 }}>
+                The official date sheet, if it disagrees with this one
+              </div>
+            </div>
+            <ExternalLink size={14} aria-hidden="true" style={{ color: 'var(--text-faint)', flexShrink: 0 }} />
+          </a>
+        ))}
+      </div>
+
+      <details className="card card-tight">
+        <summary className="muted small" style={{ cursor: 'pointer' }}>
+          The normal weekly timetable
+        </summary>
+        <p className="field-hint" style={{ margin: 'var(--s2) 0 var(--s3)' }}>
+          Not running at the moment. This is what it goes back to afterwards.
+        </p>
+        <WeekView onOpenSubject={onOpenSubject} />
+      </details>
+    </div>
+  );
+}
+
+function ExamCard({ exam, subject, onOpenSubject }) {
+  const countdown = examCountdown(exam);
+
+  return (
+    <button
+      className="card card-accent"
+      style={{ '--stripe': subject?.color }}
+      onClick={() => onOpenSubject(exam.code)}
+      aria-label={`${exam.kind} in ${subject?.title || exam.code}, ${fmt(exam.start)} in ${exam.room}. Open course links.`}
+    >
+      <div className="row-between" style={{ marginBottom: 6 }}>
+        <h3 className="truncate">{subject?.short || exam.code} · {exam.kind}</h3>
+        {countdown && <span className={`badge ${countdown.tone}`}>{countdown.text}</span>}
+      </div>
+
+      <div className="muted tiny row-wrap" style={{ gap: 6, marginBottom: 'var(--s3)' }}>
+        <span>{exam.code}</span>
+        <span aria-hidden="true">·</span>
+        <span>{subject?.title || 'Course'}</span>
+      </div>
+
+      <div className="row-between">
+        <span className="icon-row nums"><Clock size={14} aria-hidden="true" />{fmt(exam.start)} - {fmt(exam.end)}</span>
+        <span className="row" style={{ gap: 6 }}>
+          {exam.seat && <span className="badge"><Armchair size={11} aria-hidden="true" />{exam.seat}</span>}
+          <span className="badge badge-warning"><MapPin size={11} aria-hidden="true" />{exam.room}</span>
+        </span>
+      </div>
+
+      {exam.note && (
+        <div className="alert alert-accent" style={{ marginTop: 'var(--s3)', padding: 'var(--s2) var(--s3)' }}>
+          <Info size={14} aria-hidden="true" />
+          <span className="small">{exam.note}</span>
+        </div>
+      )}
+    </button>
   );
 }
 

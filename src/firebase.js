@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getAuth, GoogleAuthProvider, setPersistence, browserSessionPersistence } from "firebase/auth";
+import { getAuth, GoogleAuthProvider, setPersistence, browserLocalPersistence } from "firebase/auth";
 import { initializeFirestore, memoryLocalCache, clearIndexedDbPersistence } from "firebase/firestore";
 
 // Public config, safe to ship: access is controlled by Firestore rules + Auth.
@@ -21,7 +21,15 @@ export const googleProvider = new GoogleAuthProvider();
 export const db = initializeFirestore(app, { localCache: memoryLocalCache() });
 // Remove the previous version's on-disk cache before starting any listeners.
 // Fail closed if another tab still holds that database open.
+//
+// The sign-in itself is kept on the device (browserLocalPersistence) while the
+// records are not. These are two different things and the old code conflated
+// them: session persistence meant closing the tab signed you out, so students
+// were re-authenticating several times a day for no privacy gain — the only
+// thing it evicted was the token, and every grade and task was already
+// memory-only and gone the moment the tab closed. Signing out still clears the
+// token, and still reloads the page to drop everything in memory with it.
 export const privacyReady = Promise.all([
   clearIndexedDbPersistence(db),
-  setPersistence(auth, browserSessionPersistence),
+  setPersistence(auth, browserLocalPersistence),
 ]);

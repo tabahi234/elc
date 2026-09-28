@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   BrowserRouter as Router, Routes, Route, useLocation,
 } from 'react-router-dom';
-import { ShieldAlert } from 'lucide-react';
+import { ShieldAlert, UserX, WifiOff } from 'lucide-react';
 import { AuthProvider } from './lib/auth';
 import { useAuth } from './lib/authContext';
 import { ClassDataProvider } from './lib/classDataContext';
@@ -148,8 +148,45 @@ function Gated({ signInConsent }) {
   );
 }
 
+/**
+ * What a signed-in account gets before it has a working membership.
+ *
+ * There used to be a third state here: approval. A student signed in, was shown
+ * their Firebase user ID in a code block, and had to copy it into a message to
+ * the admin, who pasted it into a form. Nothing was decided by that round trip
+ * — anyone who could sign in was going to be approved — so it has gone. Signing
+ * in makes you a student; see the role listener in lib/auth.jsx. That leaves
+ * two real states, and they read very differently to the person in front of
+ * them, so they get different screens.
+ */
+function NoAccess({ blocked, onSignOut, email }) {
+  return (
+    <div className="auth">
+      <div className="card stack" style={{ maxWidth: 380 }}>
+        <div className="auth-mark" style={{ margin: 0 }}>
+          {blocked ? <UserX size={24} aria-hidden="true" /> : <WifiOff size={24} aria-hidden="true" />}
+        </div>
+        <h1 style={{ fontSize: 'var(--fs-h1)' }}>
+          {blocked ? 'Access removed' : 'Could not set up your account'}
+        </h1>
+        <p className="muted small">
+          {blocked
+            ? `${email} has been taken off this class by an admin. If that is a mistake, ask them to put it back.`
+            : 'Signing you up needs a connection, and this one did not get through. Reload the page once you are back online.'}
+        </p>
+        {!blocked && (
+          <button className="btn btn-primary btn-block" onClick={() => window.location.reload()}>
+            Try again
+          </button>
+        )}
+        <button className="btn btn-secondary btn-block" onClick={onSignOut}>Sign out</button>
+      </div>
+    </div>
+  );
+}
+
 function Shell() {
-  const { user, roleLoading, isMember, signOut } = useAuth();
+  const { user, roleLoading, isMember, isBlocked, signOut } = useAuth();
   // Ticked on the sign-in card, before there is an account to file it under.
   // Held here because it has to outlive the Login screen it was given on.
   const [signInConsent, setSignInConsent] = useState(null);
@@ -162,15 +199,8 @@ function Shell() {
     );
   }
   if (!user) return <Login onConsent={setSignInConsent} />;
-  if (roleLoading) return <div className="auth"><p className="muted">Checking access…</p></div>;
-  if (!isMember) return (
-    <div className="auth"><div className="card stack">
-      <h1>Class approval needed</h1>
-      <p>Ask your class administrator to approve your account. Share this user ID with them:</p>
-      <code style={{ overflowWrap: 'anywhere' }}>{user.uid}</code>
-      <button className="btn btn-secondary" onClick={signOut}>Sign out</button>
-    </div></div>
-  );
+  if (roleLoading) return <div className="auth"><p className="muted">Setting up your account…</p></div>;
+  if (!isMember) return <NoAccess blocked={isBlocked} email={user.email} onSignOut={signOut} />;
   return <Gated key={user.uid} signInConsent={signInConsent} />;
 }
 

@@ -5,7 +5,7 @@ import { db } from '../firebase';
 import { useAuth } from './authContext';
 import { useClassData } from './classDataContext';
 import { useUserDoc } from './storage';
-import { TASK_TYPES, daysFromToday } from './validate';
+import { TASK_TYPES, daysFromToday, isEventType, eventIsOver } from './validate';
 import { timestampMillis } from './timestamps';
 
 export { TASK_TYPES };
@@ -82,6 +82,21 @@ export function useGlobalTaskState() {
 }
 
 /**
+ * Decorates one merged entry with whether it is sat rather than handed in.
+ *
+ * An event carries no completion state of its own. Whether it is behind you is
+ * a fact about the calendar, not a box anybody ticked, so `completed` is
+ * derived from the date. That keeps every existing consumer — the sort, the
+ * counts, the filters — working without special-casing, while making it
+ * impossible for a quiz to sit in somebody's pending list all semester because
+ * they never went back to tick it.
+ */
+function asEntry(task) {
+  if (!isEventType(task.type)) return { ...task, isEvent: false };
+  return { ...task, isEvent: true, completed: eventIsOver(task) };
+}
+
+/**
  * The single list every screen reads: personal tasks and class broadcasts,
  * merged and sorted. Class tasks are flagged so they can't be deleted by a
  * student who only wants them off their own list.
@@ -98,18 +113,22 @@ export function useAllTasks() {
     const adopted = new Set(tasks.map((t) => t.sourceTaskId).filter(Boolean));
     const byId = new Map(globalTasks.map((t) => [t.id, t]));
     return sortTasks([
-      ...tasks.map((t) => ({
+      ...tasks.map((t) => asEntry({
         ...t,
         source: 'personal',
         classUpdate: t.sourceTaskId ? diffAgainstClass(t, byId.get(t.sourceTaskId)) : null,
       })),
       ...globalTasks
         .filter((t) => !adopted.has(t.id))
-        .map((t) => ({ ...t, source: 'class', completed: Boolean(globalState[t.id]) })),
+        .map((t) => asEntry({ ...t, source: 'class', completed: Boolean(globalState[t.id]) })),
     ]);
   }, [tasks, globalTasks, globalState]);
 
   const toggle = useCallback((task) => {
+    // Nothing to toggle on an exam. The screens do not offer a checkbox for
+    // one, and this is the second lock: a stale prop or an old cached list
+    // must not be able to write a meaningless completion flag.
+    if (isEventType(task.type)) return;
     if (task.source === 'class') toggleGlobal(task.id, !task.completed);
     else updateTask(task.id, { completed: !task.completed });
   }, [toggleGlobal, updateTask]);
@@ -225,6 +244,17 @@ export function dueBadge(task) {
   const d = daysFromToday(task.dueDate);
   if (d == null) return null;
   const pretty = (fmt) => format(new Date(`${task.dueDate}T00:00:00`), fmt);
+
+  // An exam is never due and never overdue. It is on a day, and afterwards it
+  // simply happened, so the words change even though the dates do not.
+  if (isEventType(task.type)) {
+    if (d < 0) return { text: `Sat ${pretty('MMM d')}`, tone: '' };
+    if (d === 0) return { text: 'Today', tone: 'badge-danger' };
+    if (d === 1) return { text: 'Tomorrow', tone: 'badge-danger' };
+    if (d <= 3) return { text: `In ${d} days`, tone: 'badge-warning' };
+    if (d <= 7) return { text: pretty('EEEE'), tone: 'badge-accent' };
+    return { text: pretty('MMM d'), tone: '' };
+  }
 
   if (task.completed) return { text: pretty('MMM d'), tone: '' };
   if (d < 0) return { text: d === -1 ? 'Overdue 1 day' : `Overdue ${-d} days`, tone: 'badge-danger' };

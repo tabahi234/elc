@@ -39,10 +39,15 @@ Google account. Switch with `firebase login --reauth`, then:
 npm run deploy:rules
 ```
 
-Publish the updated app and rules together. A verified Google account alone
-does not grant access: every user needs an explicit `roles/{uid}` document with
-`role` exactly `student`, `cr`, or `admin`. Missing or unreadable approval shows
-the approval screen. See [SECURITY.md](SECURITY.md) for rollout and test details.
+Publish the updated app and rules together. Access still turns on a
+`roles/{uid}` document holding `student`, `cr` or `admin`, but signing in now
+creates that document for you: the app writes `student` under your own uid,
+with the email from your own verified token, and the rules allow nothing else
+(see `selfEnrolment()` in `firestore.rules`). A verified Google account is
+therefore enough to read class content, and nothing else. Removing somebody is
+setting them to `blocked`, not deleting the row — a deleted row would simply be
+re-created on their next visit. See [SECURITY.md](SECURITY.md) for rollout and
+test details.
 
 ### 2. Make yourself an admin
 
@@ -57,10 +62,18 @@ even with the developer tools open. Create it by hand, once:
 
 Reload the app. A **Manage** tab appears in the bottom nav.
 
-Use **Manage → People → Approve a classmate** to approve each student or CR.
-Students can copy their user ID from the approval screen after signing in.
-Deleting a role revokes class access completely; to demote a CR while retaining
-access, approve their existing user ID with the Student access level.
+Classmates do not need approving. Anyone who signs in joins as a student and
+appears in **Manage → People** by themselves, listed by the email they signed
+in with. Two decisions are left there, and both are set from the dropdown on
+each row:
+
+- **Class rep** — can edit deadlines, notices, exams and the timetable.
+- **No access** — removes them. The row is kept with `role: blocked`, which is
+  what stops them signing themselves back in.
+
+You cannot change your own row from inside the app, and you cannot change
+another admin's. Both are Firebase-console-only, so no tap here can lock the
+class out.
 
 ### 3. Publish the starter timetable
 
@@ -79,6 +92,95 @@ type, day, start and end time, room, plus a dated "room changed" note. The
 editor shows the resulting duration as you type and refuses a slot that clashes
 with another one.
 
+### 4. Exams
+
+**Manage → Exams** holds two things that go together.
+
+*The date sheet* is one entry per paper: subject, which exam (Mid, Final, Lab
+exam, Quiz), date, start and end, room, and an optional seat number. It lands
+on every dashboard with a countdown.
+
+There is one `Mid` rather than a numbered pair, because every entry already
+carries its own date and subject — two mid-terms are simply two entries, and a
+menu offering "Mid II" to a course with one mid invites the wrong answer.
+
+*The exam period* is the switch that suspends the weekly timetable. While it is
+on, Classes shows the date sheet instead of the week, and the dashboard counts
+down to the next paper rather than the next class. It is a switch rather than
+something inferred from the dates, because classes carry straight through the
+sessionals and stop for the finals and no rule gets that right every semester.
+Give it a last day: it then turns itself off and the timetable comes back
+without anybody remembering to do it.
+
+The weekly timetable is never deleted — it moves to a fold-out at the bottom of
+the exam schedule, because "when do classes start again" is a real question.
+
+---
+
+## What the dashboard says about today
+
+`todayShape()` in `src/lib/schedule.js` answers this in one word, next to the
+rest of "what actually happens on a date", so the dashboard and the week view
+cannot drift apart:
+
+| | when | what the card says |
+|---|---|---|
+| `ahead` | a class still to come | the next one, tappable |
+| `done` | all of today's classes are behind you | *That is everything. Go and get some rest.* |
+| `free` | nothing was on, or the CR cleared the day | a ranked revision suggestion (`lib/restday.js`) |
+| `unknown` | nothing published, or still loading | nothing |
+
+`free` and `done` are separate on purpose. "Nothing was on today" and "you have
+done all of it" are different facts about a day, and collapsing them is how an
+app ends up congratulating somebody for a public holiday.
+
+`done` still checks before it says well done: a deadline due tonight makes "go
+and rest" actively bad advice, so when there is one the card names it and links
+to it instead.
+
+**Finished classes leave the list.** `remainingOn()` drops a class the moment
+its end time passes, so *Rest of today* really is the rest of today. They used
+to grey out at 45% opacity, which by mid-afternoon left a list made mostly of
+things that had already happened — the opposite of what the list is for. A
+*cancelled* class stays until its slot has passed, because "do not come in" is
+news right up to the moment it stops being news.
+
+**The next-class card opens.** Tapping it (or any row in *Rest of today*)
+shows the time and room actually in effect for that date — a one-off move
+included — plus the teacher, the Drive folder, the Classroom and what is
+pending for that subject. That card is the single thing most students look at
+before leaving, and everything they went looking for next was three screens
+away.
+
+## Deadlines and exams are different things
+
+A deadline is worked at and handed in. An exam is a room, an hour and a seat.
+The app used to treat them as one list, which produced a tick box on a quiz
+that meant nothing and a "pending" entry that stayed pending for the rest of
+the semester unless somebody went and lied to it.
+
+So anything typed as **Quiz, Mid or Final** is shown as an event: its own
+section on Deadlines, a countdown instead of a due date, no checkbox, and it
+folds itself away once the date has passed. `EVENT_TYPES` in
+`src/lib/validate.js` is the single list that decides this, and
+`useAllTasks` derives `completed` from the calendar for anything in it, so
+every existing consumer — the sort, the counts, the nav badge — keeps working
+without special-casing.
+
+Tapping any row — deadline or exam — opens the whole record read-only:
+type, the full date and time, where it came from, and the complete note. The
+cards clamp their note to two lines, so before this the only way to read a long
+submission format was the edit form, which on a class deadline a student cannot
+open at all.
+
+**Retired vocabulary.** Mids used to be called sessionals here.
+`LEGACY_TASK_TYPES` keeps `Sessional` valid in the rules and in
+`EVENT_TYPES`, so records already written under it stay readable, editable and
+correctly treated as events — it is simply off every menu. `typeOptions()`
+folds a record's own type back into its dropdown, because a `<select>` whose
+value is not among its options silently falls back to the first one, and saving
+would then retype somebody's quiz as an Assignment.
+
 ---
 
 ## Who can do what
@@ -92,11 +194,13 @@ with another one.
 | Cancel, move or add a single class | , | ✅ | ✅ |
 | Edit subjects, Drive / Classroom links | , | ✅ | ✅ |
 | Edit the timetable, change a room | , | ✅ | ✅ |
-| Add or remove a CR | , | , | ✅ |
+| Add or remove a CR, remove a classmate | , | , | ✅ |
 | Create another admin | , | , | Firebase console only |
 
-An admin approves a student or appoints a CR from **Manage → People** using their Firebase user ID
-(they have to sign in once first, so they exist in Authentication).
+| Publish the exam date sheet, switch exam mode on | , | ✅ | ✅ |
+
+Signing in is the whole sign-up: an admin appoints or removes people from
+**Manage → People**, where everyone who has signed in is already listed.
 
 A student's grades and study log are readable only by that student. **Not by
 the CR, and not by an admin**. That is enforced in the rules, not just hidden
@@ -334,7 +438,7 @@ sentence.
   It used to redirect silently to the dashboard, which looks exactly like the
   app ignoring the tap.
 - `OfflineBar` indicates lost connectivity. The app shell is cached, but private
-  records now use memory only. Reloading requires a connection to check approval,
+  records use memory only. Reloading requires a connection to read your role,
   and pending writes can be lost when closing or reloading offline.
 
 ## Icons
@@ -354,6 +458,20 @@ The maskable icon is a separate file rather than the same artwork tagged
 `maskable`, because Android crops a maskable icon to a circle and the rounded
 plate would lose its corners.
 
+## Staying signed in
+
+Firestore uses `memoryLocalCache()` and the previous version's IndexedDB cache
+is cleared at startup, so no private record is ever written to the device. Auth
+uses `browserLocalPersistence`, so the token is.
+
+Those are two different questions and the old code answered them with one
+setting. `browserSessionPersistence` ended the session with the browser tab,
+which meant students re-authenticating through Google several times a day — and
+it bought no privacy, because every grade, task and study entry was already
+memory-only and gone the moment the tab closed. The only thing it evicted was
+the token. Signing out still calls `signOut` and then reloads the page, which
+drops both.
+
 ## Legal
 
 `src/lib/legal.js` holds a short privacy notice and short terms, as plain
@@ -372,6 +490,15 @@ student's own settings document the moment sign-in gives it a uid to file it
 under, recording which `CONSENT_VERSION` was agreed to. It counts for that
 session immediately, so nobody who has just agreed is asked again while the
 write is in flight. If the write fails they simply tick again next session.
+
+**Why it used to ask on every single visit.** The settings document lives at
+`users/{uid}/data/settings`, and its rule requires `isMember()` — so while a
+student was waiting to be approved, the write that records their agreement was
+rejected by the server every time. Nothing was ever stored, so nothing was ever
+remembered. Signing in with no approval step means the role document exists
+before that write is attempted, which is what actually fixed it; keeping the
+sign-in on the device (below) is what stopped them being sent back to the
+sign-in card in the first place.
 
 `components/Consent.jsx` survives as the **re-consent** screen, for the one
 case the sign-in card cannot cover: a session that is already signed in when

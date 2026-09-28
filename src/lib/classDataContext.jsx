@@ -9,6 +9,11 @@ import { subjects as defaultSubjects, timetable as defaultTimetable } from '../d
 
 export const ClassDataContext = createContext(null);
 
+// No exam period set up yet. A missing config document and an explicitly
+// switched-off one have to look identical to every screen, or the timetable
+// disappears the first time somebody opens the app before a CR has been here.
+const EXAM_MODE_OFF = { active: false, label: '', from: '', to: '' };
+
 /**
  * Class-wide data: subjects, the weekly timetable, and broadcast deadlines.
  *
@@ -46,6 +51,9 @@ export function ClassDataProvider({ children }) {
   // deadlines. Both are class-wide and both are written only by a manager.
   const [classChanges, setClassChanges] = useState([]);
   const [announcements, setAnnouncements] = useState([]);
+  // The exam schedule, and the switch that says it has replaced the timetable.
+  const [exams, setExams] = useState([]);
+  const [examMode, setExamMode] = useState(EXAM_MODE_OFF);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -53,11 +61,12 @@ export function ClassDataProvider({ children }) {
     if (!user) {
       setRemoteSubjects(null); setRemoteTimetable(null); setGlobalTasks([]);
       setClassChanges([]); setAnnouncements([]);
+      setExams([]); setExamMode(EXAM_MODE_OFF);
       setLoading(false);
       return;
     }
     setLoading(true);
-    let pending = 5;
+    let pending = 7;
     const done = () => { if (--pending <= 0) setLoading(false); };
     const fail = (where) => (err) => {
       console.error(`${where} listener:`, err);
@@ -97,9 +106,27 @@ export function ClassDataProvider({ children }) {
       fail('announcements')
     );
 
+    const unsubExams = onSnapshot(
+      query(collection(db, 'exams'), orderBy('date', 'asc')),
+      (snap) => { setExams(snap.docs.map((d) => ({ id: d.id, ...d.data() }))); done(); },
+      fail('exams')
+    );
+
+    // A single document rather than a collection: there is exactly one exam
+    // period on at a time, and the rules refuse any other id.
+    const unsubExamMode = onSnapshot(
+      doc(db, 'config', 'examMode'),
+      (snap) => {
+        setExamMode(snap.exists() ? { ...EXAM_MODE_OFF, ...snap.data() } : EXAM_MODE_OFF);
+        done();
+      },
+      fail('examMode')
+    );
+
     return () => {
       unsubSubjects(); unsubTimetable(); unsubTasks();
       unsubChanges(); unsubAnnouncements();
+      unsubExams(); unsubExamMode();
     };
   }, [user]);
 
@@ -195,6 +222,23 @@ export function ClassDataProvider({ children }) {
     guard() ?? commit(deleteDoc(doc(db, 'classChanges', id))),
   [canManage]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const saveExam = useCallback((id, data) => {
+    const blocked = guard();
+    if (blocked) return blocked;
+    const payload = { ...data, ...stamp() };
+    return commit(id
+      ? setDoc(doc(db, 'exams', id), payload)
+      : addDoc(collection(db, 'exams'), payload));
+  }, [stamp, canManage]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const deleteExam = useCallback((id) =>
+    guard() ?? commit(deleteDoc(doc(db, 'exams', id))),
+  [canManage]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const saveExamMode = useCallback((data) =>
+    guard() ?? commit(setDoc(doc(db, 'config', 'examMode'), { ...data, ...stamp() })),
+  [stamp, canManage]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const saveAnnouncement = useCallback((id, data) => {
     const blocked = guard();
     if (blocked) return blocked;
@@ -271,12 +315,14 @@ export function ClassDataProvider({ children }) {
 
   const value = {
     subjects, timetable, globalTasks, classChanges, announcements,
+    exams, examMode,
     loading, error, usingDefaults,
     saveSubject, deleteSubject,
     saveSlot, deleteSlot,
     saveGlobalTask, deleteGlobalTask,
     saveClassChange, deleteClassChange,
     saveAnnouncement, deleteAnnouncement,
+    saveExam, deleteExam, saveExamMode,
     publishDefaults,
   };
 

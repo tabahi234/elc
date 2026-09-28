@@ -1,10 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { collection, deleteDoc, doc, onSnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
+import { collection, doc, onSnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
 import { format, parse } from 'date-fns';
 import {
   Plus, Pencil, Trash2, Megaphone, BookOpen, CalendarDays, Users,
-  ExternalLink, Link2, ShieldCheck, Info, MapPin, Sparkles, Clock, CalendarClock,
+  Link2, ShieldCheck, Info, MapPin, Sparkles, Clock, CalendarClock,
   Share2, CalendarX2, CalendarPlus, ArrowRightLeft, Copy, Ban,
+  FileText, Armchair, UserX, Search,
 } from 'lucide-react';
 import { db } from '../firebase';
 import { useAuth } from '../lib/authContext';
@@ -12,13 +13,16 @@ import { useClassData } from '../lib/classDataContext';
 import { useToast } from '../lib/toastContext';
 import { Field, Sheet, ConfirmButton, EmptyState, Tabs } from '../components/ui';
 import {
-  LIMITS, TASK_TYPES, SLOT_TYPES, clean, hasErrors, todayIso, toMinutes,
-  vTask, vSubject, vSubjectCode, vSlot, vClassChange, vAnnouncement,
+  LIMITS, SLOT_TYPES, EXAM_KINDS, typeOptions, clean, hasErrors, todayIso, toMinutes,
+  vTask, vSubject, vSubjectCode, vSlot, vClassChange, vAnnouncement, vExam, vExamMode,
   dueDateHint, safeLink, daysFromToday,
 } from '../lib/validate';
 import { friendlyError } from '../lib/errors';
 import { classesOn, upcomingChanges, describeChange, changeIsPast } from '../lib/schedule';
 import { isLive } from '../lib/announcements';
+import {
+  examModeActive, examModeDates, upcomingExams, pastExams, examCountdown, examShareText,
+} from '../lib/exams';
 import {
   shareText, shareSupported,
   deadlineShareText, announcementShareText, changeShareText,
@@ -92,6 +96,7 @@ export default function Admin() {
   const tabs = [
     { value: 'deadlines', label: 'Deadlines', icon: CalendarClock },
     { value: 'notices', label: 'Notices', icon: Megaphone },
+    { value: 'exams', label: 'Exams', icon: FileText },
     { value: 'subjects', label: 'Subjects', icon: BookOpen },
     { value: 'timetable', label: 'Timetable', icon: CalendarDays },
     ...(isAdmin ? [{ value: 'people', label: 'People', icon: Users }] : []),
@@ -129,6 +134,7 @@ export default function Admin() {
       <div style={{ marginTop: 'var(--s4)' }}>
         {tab === 'deadlines' && <DeadlinesTab />}
         {tab === 'notices' && <NoticesTab />}
+        {tab === 'exams' && <ExamsTab />}
         {tab === 'subjects' && <SubjectsTab />}
         {tab === 'timetable' && <TimetableTab />}
         {tab === 'people' && isAdmin && <PeopleTab />}
@@ -328,7 +334,7 @@ function TaskSheet({ task, subjects, onClose, onSave }) {
           </Field>
           <Field label="Type" required error={show('type')}>
             <select value={form.type} onChange={set('type')}>
-              {TASK_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+              {typeOptions(form.type).map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
         </div>
@@ -581,6 +587,375 @@ function untilHint(until) {
   if (left === 1) return 'Shows today and tomorrow.';
   if (left > 0) return `Shows for the next ${left} days, then disappears by itself.`;
   return null;
+}
+
+/* ══ Exams ═══════════════════════════════════════════════════════════════════ */
+
+/**
+ * The date sheet, and the switch that puts it in front of the timetable.
+ *
+ * Exams are kept apart from deadlines on purpose. A deadline is something a
+ * student works at and hands in; an exam is a room, an hour and a seat, and
+ * during the sessionals or the finals it is the only schedule that is true —
+ * the weekly timetable is actively misleading, because those classes are not
+ * running. So this tab publishes the papers AND owns the switch that suspends
+ * the timetable, since publishing one without the other is how half a class
+ * ends up in an empty lecture hall on the morning of a final.
+ */
+const blankExam = (subjects) => ({
+  code: Object.keys(subjects)[0] || '',
+  kind: 'Mid',
+  date: '', start: '09:00', end: '10:30',
+  room: '', seat: '', note: '',
+});
+
+function ExamsTab() {
+  const { subjects, exams, examMode, saveExam, deleteExam, usingDefaults } = useClassData();
+  const report = useCommitToast();
+  const [editing, setEditing] = useState(null);
+
+  const ahead = upcomingExams(exams);
+  const sat = pastExams(exams);
+
+  const remove = async (exam) => {
+    report(await deleteExam(exam.id), 'Taken off the date sheet.');
+  };
+
+  return (
+    <div className="stack">
+      <ExamModeCard config={examMode} examCount={ahead.length} />
+
+      <hr className="divider" style={{ marginTop: 'var(--s2)' }} />
+
+      <div className="section-head" style={{ marginTop: 'var(--s2)', marginBottom: 0 }}>
+        <h2 className="section-title">The date sheet</h2>
+      </div>
+      <p className="field-hint" style={{ marginTop: -4 }}>
+        One entry per paper. Room and seat are what people actually come here for,
+        so put them in as soon as they are up, even if the rest is provisional.
+      </p>
+
+      <button
+        className="btn btn-primary btn-block"
+        onClick={() => setEditing(blankExam(subjects))}
+        disabled={usingDefaults}
+      >
+        <Plus size={18} aria-hidden="true" /> Add an exam
+      </button>
+      {usingDefaults && (
+        <p className="field-hint">Publish the timetable first so an exam can be tied to a subject.</p>
+      )}
+
+      {ahead.length === 0 ? (
+        <div className="card">
+          <EmptyState icon={FileText} title="No exams on the schedule">
+            Everything you add here shows up on the class&rsquo;s dashboard with a
+            countdown, and takes over the Classes screen once you switch exams on.
+          </EmptyState>
+        </div>
+      ) : (
+        <div className="stack-sm">
+          {ahead.map((exam) => (
+            <ExamRow
+              key={exam.id}
+              exam={exam}
+              subjects={subjects}
+              onEdit={setEditing}
+              onDelete={remove}
+            />
+          ))}
+        </div>
+      )}
+
+      {sat.length > 0 && (
+        <details className="card card-tight">
+          <summary className="muted small" style={{ cursor: 'pointer' }}>
+            Already sat ({sat.length})
+          </summary>
+          <p className="field-hint" style={{ margin: 'var(--s2) 0 var(--s3)' }}>
+            Still on the class&rsquo;s screen, folded away. Delete them once a term.
+          </p>
+          <div className="stack-sm">
+            {sat.slice(0, 20).map((exam) => (
+              <ExamRow
+                key={exam.id}
+                exam={exam}
+                subjects={subjects}
+                onEdit={setEditing}
+                onDelete={remove}
+                past
+              />
+            ))}
+          </div>
+        </details>
+      )}
+
+      {editing && (
+        <ExamSheet
+          exam={editing}
+          subjects={subjects}
+          existing={exams}
+          onClose={() => setEditing(null)}
+          onSave={async (data) => {
+            const ok = report(
+              await saveExam(editing.id ?? null, data),
+              editing.id ? 'Date sheet updated for the class.' : 'Added to the class date sheet.'
+            );
+            if (ok) setEditing(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The switch itself.
+ *
+ * It is a switch somebody throws, not something inferred from the exam dates,
+ * because classes carry straight through the sessionals and stop for the
+ * finals and no rule the app could invent gets that right every semester. The
+ * dates only narrow when it applies, so it can be set up a fortnight ahead and
+ * then starts and ends on its own — which matters, because the failure mode
+ * here is a CR who forgets to switch it off and hides the timetable for a month.
+ */
+function ExamModeCard({ config, examCount }) {
+  const { saveExamMode } = useClassData();
+  const report = useCommitToast();
+  const [form, setForm] = useState({
+    active: Boolean(config.active),
+    label: config.label || 'Mids',
+    from: config.from || '',
+    to: config.to || '',
+  });
+  const [touched, setTouched] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const errors = vExamMode(form);
+  const show = (key) => (touched ? errors[key] : undefined);
+  const liveNow = examModeActive(config);
+  const span = examModeDates(form);
+
+  const save = async () => {
+    setTouched(true);
+    if (hasErrors(errors)) return;
+    setSaving(true);
+    const ok = report(
+      await saveExamMode({
+        active: Boolean(form.active),
+        label: clean(form.label),
+        from: form.from || '',
+        to: form.to || '',
+      }),
+      form.active ? 'Exam schedule is now what the class sees.' : 'Back to the normal timetable.'
+    );
+    if (ok) setTouched(false);
+    setSaving(false);
+  };
+
+  return (
+    <div className="card stack">
+      <div className="row-between">
+        <div className="grow">
+          <h2 className="section-title">Exam period</h2>
+          <p className="muted small" style={{ marginTop: 2 }}>
+            While this is on, the class sees the date sheet instead of the weekly
+            timetable, and the dashboard counts down to their next paper.
+          </p>
+        </div>
+        <span className={`badge ${liveNow ? 'badge-warning' : ''}`} style={{ flexShrink: 0 }}>
+          {liveNow ? 'On now' : config.active ? 'Scheduled' : 'Off'}
+        </span>
+      </div>
+
+      <label className="row" style={{ gap: 10, cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={form.active}
+          onChange={(e) => setForm((f) => ({ ...f, active: e.target.checked }))}
+          style={{ width: 18, height: 18, minHeight: 0, accentColor: 'var(--accent)' }}
+        />
+        <span className="small">Classes are suspended for exams</span>
+      </label>
+
+      <Field label="What to call it" error={show('label')} hint="Shown at the top of their screen.">
+        <input
+          value={form.label}
+          onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
+          placeholder="Mids"
+          maxLength={60}
+        />
+      </Field>
+
+      <div className="field-grid">
+        <Field label="First day" error={show('from')} hint="Optional.">
+          <input type="date" value={form.from} onChange={(e) => setForm((f) => ({ ...f, from: e.target.value }))} />
+        </Field>
+        <Field label="Last day" error={show('to')} hint="It switches itself off after this.">
+          <input type="date" value={form.to} onChange={(e) => setForm((f) => ({ ...f, to: e.target.value }))} />
+        </Field>
+      </div>
+
+      {form.active && !form.to && (
+        <p className="field-warn">
+          <Info size={13} aria-hidden="true" />
+          With no last day this stays on until you come back and turn it off, and the
+          whole class has no timetable until you do. Set the date now while you know it.
+        </p>
+      )}
+
+      {form.active && form.to && (
+        <p className="field-hint">
+          The class sees the date sheet{span ? ` ${span}` : ''}, then the timetable comes
+          back by itself. {examCount} {examCount === 1 ? 'paper is' : 'papers are'} published.
+        </p>
+      )}
+
+      <button className="btn btn-primary" onClick={save} disabled={saving} type="button">
+        {saving ? 'Saving…' : 'Save exam period'}
+      </button>
+    </div>
+  );
+}
+
+function ExamRow({ exam, subjects, onEdit, onDelete, past }) {
+  const subject = subjects[exam.code];
+  const countdown = examCountdown(exam);
+
+  return (
+    <div
+      className="card card-tight card-accent row"
+      style={{ '--stripe': subject?.color, alignItems: 'flex-start', opacity: past ? 0.6 : 1 }}
+    >
+      <div className="grow" style={{ minWidth: 0 }}>
+        <div style={{ fontWeight: 650 }}>{exam.kind} · {subject?.short || exam.code}</div>
+        <div className="muted tiny row-wrap nums" style={{ marginTop: 4, gap: 8 }}>
+          <span>{prettyDate(exam.date)}</span>
+          <span className="row" style={{ gap: 4 }}>
+            <Clock size={11} aria-hidden="true" />{prettyTime(exam.start)}-{prettyTime(exam.end)}
+          </span>
+          <span className="row" style={{ gap: 4 }}><MapPin size={11} aria-hidden="true" />{exam.room}</span>
+          {exam.seat && (
+            <span className="row" style={{ gap: 4 }}><Armchair size={11} aria-hidden="true" />{exam.seat}</span>
+          )}
+        </div>
+        {exam.note && <p className="muted small" style={{ marginTop: 6 }}>{exam.note}</p>}
+        {!past && countdown && (
+          <div className="row-wrap" style={{ marginTop: 6 }}>
+            <span className={`badge ${countdown.tone}`}>{countdown.text}</span>
+          </div>
+        )}
+      </div>
+      <ShareButton
+        text={examShareText(exam, subjects)}
+        label={`Share this ${exam.kind} with the class group`}
+      />
+      <button className="btn-icon btn-icon-sm" onClick={() => onEdit(exam)} aria-label="Edit this exam">
+        <Pencil size={15} aria-hidden="true" />
+      </button>
+      <ConfirmButton onConfirm={() => onDelete(exam)} label="Delete this exam">
+        <Trash2 size={15} aria-hidden="true" />
+      </ConfirmButton>
+    </div>
+  );
+}
+
+function ExamSheet({ exam, subjects, existing, onClose, onSave }) {
+  const [form, setForm] = useState(exam);
+  const [touched, setTouched] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const errors = vExam({ ...form, id: exam.id }, existing);
+  const show = (key) => (touched ? errors[key] : undefined);
+  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setTouched(true);
+    if (hasErrors(errors)) return;
+    setSaving(true);
+    await onSave({
+      code: form.code,
+      kind: form.kind,
+      date: form.date,
+      start: form.start,
+      end: form.end,
+      room: clean(form.room),
+      seat: clean(form.seat),
+      note: clean(form.note),
+    });
+    setSaving(false);
+  };
+
+  return (
+    <Sheet
+      open
+      onClose={onClose}
+      title={exam.id ? 'Edit this exam' : 'Add an exam'}
+      subtitle="Everyone sees the room, the hour and the countdown straight away."
+      footer={
+        <>
+          <button className="btn btn-secondary" onClick={onClose} type="button">Cancel</button>
+          <button className="btn btn-primary" onClick={submit} disabled={saving} type="button">
+            {saving ? 'Saving…' : exam.id ? 'Save changes' : 'Publish it'}
+          </button>
+        </>
+      }
+    >
+      <form className="stack" onSubmit={submit}>
+        <div className="field-grid">
+          <Field label="Subject" required error={show('code')}>
+            <select value={form.code} onChange={set('code')}>
+              {Object.entries(subjects).map(([code, s]) => (
+                <option key={code} value={code}>{s.short} ({code})</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Which exam" required error={show('kind')}>
+            <select value={form.kind} onChange={set('kind')}>
+              {EXAM_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+            </select>
+          </Field>
+        </div>
+
+        <Field label="Date" required error={show('date')} hint={dueDateHint(form.date)}>
+          <input type="date" value={form.date} onChange={set('date')} onBlur={() => setTouched(true)} />
+        </Field>
+
+        <div className="field-grid">
+          <Field label="Starts" required error={show('start')}>
+            <input type="time" value={form.start} onChange={set('start')} onBlur={() => setTouched(true)} step={300} />
+          </Field>
+          <Field label="Ends" required error={show('end')}>
+            <input type="time" value={form.end} onChange={set('end')} onBlur={() => setTouched(true)} step={300} />
+          </Field>
+        </div>
+
+        <div className="field-grid">
+          <Field label="Room" required error={show('room')} hint="The only thing anyone checks in the corridor.">
+            <input value={form.room} onChange={set('room')} onBlur={() => setTouched(true)} placeholder="E-1" maxLength={LIMITS.room.max} />
+          </Field>
+          <Field label="Seat" error={show('seat')} hint="Optional, if seats are numbered.">
+            <input value={form.seat} onChange={set('seat')} placeholder="A-14" maxLength={24} />
+          </Field>
+        </div>
+
+        <Field
+          label="Note to the class" error={show('note')}
+          hint="What to bring, what is on it, anything they will ask about."
+          counter={{ value: clean(form.note).length, max: 140 }}
+        >
+          <input value={form.note} onChange={set('note')} placeholder="Chapters 1-4. Calculator allowed, no phones." maxLength={140} />
+        </Field>
+
+        <p className="field-hint row" style={{ alignItems: 'flex-start', gap: 6 }}>
+          <Info size={13} aria-hidden="true" style={{ marginTop: 2, flexShrink: 0 }} />
+          Nobody ticks an exam off. It counts down, it happens, and then it folds
+          itself away on its own once the date has passed.
+        </p>
+      </form>
+    </Sheet>
+  );
 }
 
 /* ══ Subjects & links ════════════════════════════════════════════════════════ */
@@ -1412,10 +1787,32 @@ function dateHint(date) {
 
 /* ══ People ══════════════════════════════════════════════════════════════════ */
 
+/**
+ * Who is in the class, and what each of them can do.
+ *
+ * This used to be an approval queue. A student signed in, was shown their
+ * Firebase user ID in a code block, copied it into a message, and waited for an
+ * admin to paste it into a form here — a round trip that decided nothing,
+ * because anyone who could sign in was going to be let in. Signing in now makes
+ * you a student by itself (see firestore.rules), so this screen is no longer a
+ * gate. It is a directory with two decisions left in it, and both are real:
+ * who is the class representative, and who should not be here at all.
+ *
+ * Removing someone sets them to 'blocked' rather than deleting the record,
+ * because self-enrolment would immediately let a deleted person back in. A
+ * blocked document is the thing standing in their way.
+ */
+const ROLE_CHOICES = [
+  { value: 'student', label: 'Student', blurb: 'Sees everything, changes nothing.' },
+  { value: 'cr', label: 'Class rep', blurb: 'Can edit deadlines, notices, exams and the timetable.' },
+  { value: 'blocked', label: 'No access', blurb: 'Signed up, then removed. Cannot get back in.' },
+];
+
 function PeopleTab() {
   const { user } = useAuth();
   const [roles, setRoles] = useState([]);
   const [error, setError] = useState(null);
+  const [search, setSearch] = useState('');
 
   useEffect(() => onSnapshot(
     collection(db, 'roles'),
@@ -1423,28 +1820,86 @@ function PeopleTab() {
     (err) => setError(err)
   ), []);
 
+  // Managers first, then blocked last: the two ends of the list are the two
+  // things an admin came here to look at.
+  const order = { admin: 0, cr: 1, student: 2, blocked: 3 };
+  const needle = clean(search).toLowerCase();
+  const visible = roles
+    .filter((r) => !needle || String(r.email || '').toLowerCase().includes(needle))
+    .sort((a, b) =>
+      (order[a.role] ?? 9) - (order[b.role] ?? 9)
+      || String(a.email || '').localeCompare(String(b.email || '')));
+
+  const counts = {
+    cr: roles.filter((r) => r.role === 'cr').length,
+    students: roles.filter((r) => r.role === 'student').length,
+    blocked: roles.filter((r) => r.role === 'blocked').length,
+  };
+
   return (
     <div className="stack">
       <div className="alert alert-accent">
         <ShieldCheck size={16} aria-hidden="true" />
         <div className="alert-body">
-          <strong>How access works.</strong> A class representative can edit deadlines,
-          subjects and the timetable. Only an admin can approve students or CRs, and the
-          admin role itself can only be granted from the Firebase console, so nobody
-          can promote themselves from inside the app, even with the developer tools open.
+          <strong>How access works.</strong> Anyone who signs in joins as a student,
+          so nobody waits on you to be let in. You decide two things: who is a class
+          representative, and who is removed. The admin role itself can only be
+          granted from the Firebase console, so nobody can promote themselves from
+          inside the app even with the developer tools open.
         </div>
       </div>
 
-      <GrantCR existing={roles} />
+      {counts.cr === 0 && (
+        <div className="alert alert-warning">
+          <Info size={16} aria-hidden="true" />
+          <span className="alert-body">
+            No class representative yet. Until you appoint one, you are the only
+            person who can publish a deadline or change the timetable.
+          </span>
+        </div>
+      )}
 
       <section className="section" style={{ marginTop: 'var(--s2)' }}>
-        <div className="section-head"><h2 className="section-title">Current access</h2></div>
-        {error && <div className="alert alert-danger"><Info size={15} aria-hidden="true" />{friendlyError(error)}</div>}
-        {roles.length === 0 && !error && (
-          <div className="card"><EmptyState icon={Users} title="No roles assigned">Class access requires approval.</EmptyState></div>
+        <div className="section-head">
+          <h2 className="section-title">In this class</h2>
+          <span className="muted small">
+            {counts.students + counts.cr} active{counts.blocked > 0 ? ` · ${counts.blocked} removed` : ''}
+          </span>
+        </div>
+
+        {roles.length > 8 && (
+          <div className="row" style={{ gap: 8, marginBottom: 'var(--s3)' }}>
+            <Search size={16} aria-hidden="true" style={{ color: 'var(--text-faint)', flexShrink: 0 }} />
+            <input
+              className="grow"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Find by email"
+              aria-label="Find a classmate by email"
+            />
+          </div>
         )}
+
+        {error && (
+          <div className="alert alert-danger">
+            <Info size={15} aria-hidden="true" />{friendlyError(error)}
+          </div>
+        )}
+
+        {!error && roles.length === 0 && (
+          <div className="card">
+            <EmptyState icon={Users} title="Nobody has signed in yet">
+              The first classmate to open the app appears here by themselves.
+            </EmptyState>
+          </div>
+        )}
+
+        {!error && roles.length > 0 && visible.length === 0 && (
+          <p className="field-hint">No email matches &ldquo;{clean(search)}&rdquo;.</p>
+        )}
+
         <div className="stack-sm">
-          {roles.map((r) => <RoleRow key={r.uid} role={r} isSelf={r.uid === user.uid} />)}
+          {visible.map((r) => <RoleRow key={r.uid} role={r} isSelf={r.uid === user.uid} />)}
         </div>
       </section>
     </div>
@@ -1452,67 +1907,33 @@ function PeopleTab() {
 }
 
 function RoleRow({ role, isSelf }) {
-  const report = useCommitToast();
-  const [busy, setBusy] = useState(false);
-
-  const revoke = async () => {
-    setBusy(true);
-    try {
-      await deleteDoc(doc(db, 'roles', role.uid));
-      report({ ok: true }, `${role.email || role.uid} no longer has class access.`);
-    } catch (error) {
-      report({ ok: false, error });
-    }
-    setBusy(false);
-  };
-
-  return (
-    <div className="card card-tight row">
-      <div className="grow" style={{ minWidth: 0 }}>
-        <div className="truncate" style={{ fontWeight: 600 }}>{role.email || '(no email recorded)'}</div>
-        <div className="muted tiny truncate">{role.uid}</div>
-      </div>
-      <span className={`badge ${role.role === 'admin' ? 'badge-danger' : 'badge-accent'}`}>{role.role}</span>
-      {role.role !== 'admin' && !isSelf && (
-        <ConfirmButton onConfirm={revoke} label="Revoke access" className="btn-icon btn-icon-sm btn-icon-danger">
-          {busy ? '…' : <Trash2 size={15} aria-hidden="true" />}
-        </ConfirmButton>
-      )}
-    </div>
-  );
-}
-
-function GrantCR({ existing }) {
   const { user } = useAuth();
   const report = useCommitToast();
-  const [uid, setUid] = useState('');
-  const [email, setEmail] = useState('');
-  const [grantedRole, setGrantedRole] = useState('student');
-  const [touched, setTouched] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  const errors = {};
-  const trimmedUid = clean(uid);
-  if (!trimmedUid) errors.uid = 'Paste the user ID.';
-  else if (!/^[A-Za-z0-9]{20,64}$/.test(trimmedUid)) errors.uid = 'That does not look like a Firebase user ID.';
-  else if (trimmedUid === user.uid) errors.uid = 'You cannot change your own role.';
-  else if (existing.some((r) => r.uid === trimmedUid && r.role === 'admin')) errors.uid = 'That user is an admin already.';
-  if (!clean(email).includes('@')) errors.email = 'Add their email so the list is readable.';
+  // An admin is not editable from here by design, and neither is the person
+  // doing the editing — that is what makes locking yourself out impossible.
+  const fixed = role.role === 'admin' || isSelf;
+  const blocked = role.role === 'blocked';
 
-  const submit = async (e) => {
-    e.preventDefault();
-    setTouched(true);
-    if (hasErrors(errors)) return;
+  const change = async (next) => {
+    if (next === role.role) return;
     setBusy(true);
     try {
-      await setDoc(doc(db, 'roles', trimmedUid), {
-        role: grantedRole,
-        email: clean(email),
+      await setDoc(doc(db, 'roles', role.uid), {
+        role: next,
+        // Resent unchanged: the rules require an email on every write, and the
+        // one already on the document is the one they signed in with.
+        email: role.email || '',
         updatedAt: serverTimestamp(),
         updatedBy: user.uid,
       });
-      report({ ok: true }, `${clean(email)} now has ${grantedRole === 'cr' ? 'class representative' : 'student'} access.`);
-      setUid(''); setEmail(''); setTouched(false);
+      const said = {
+        cr: `${role.email || 'They'} can now edit class content.`,
+        student: `${role.email || 'They'} is back to a normal student.`,
+        blocked: `${role.email || 'They'} has been removed from the class.`,
+      };
+      report({ ok: true }, said[next]);
     } catch (error) {
       report({ ok: false, error });
     }
@@ -1520,31 +1941,53 @@ function GrantCR({ existing }) {
   };
 
   return (
-    <form className="card stack" onSubmit={submit}>
-      <div>
-        <h2 className="section-title">Approve a classmate</h2>
-        <p className="muted small" style={{ marginTop: 2 }}>
-          Find their user ID in Firebase console → Authentication → Users. They have to
-          sign in once before they appear there.
-        </p>
+    <div className="card card-tight" style={{ opacity: blocked ? 0.62 : 1 }}>
+      <div className="row">
+        <div className="grow" style={{ minWidth: 0 }}>
+          <div className="truncate" style={{ fontWeight: 600 }}>
+            {role.email || '(no email recorded)'}
+          </div>
+          <div className="muted tiny truncate">{role.uid}</div>
+        </div>
+        <span
+          className={`badge ${role.role === 'admin' ? 'badge-danger'
+            : role.role === 'cr' ? 'badge-accent'
+            : blocked ? 'badge-warning' : ''}`}
+          style={{ flexShrink: 0 }}
+        >
+          {blocked && <UserX size={10} aria-hidden="true" />}
+          {role.role === 'admin' ? 'admin'
+            : role.role === 'cr' ? 'class rep'
+            : blocked ? 'removed' : 'student'}
+        </span>
       </div>
-      <Field label="Firebase user ID" required error={touched ? errors.uid : undefined}>
-        <input value={uid} onChange={(e) => setUid(e.target.value)} onBlur={() => setTouched(true)}
-          placeholder="e.g. 7Kc2fQ1mZ9XbTn4wLpR8sVd3Ae02" spellCheck={false} />
-      </Field>
-      <Field label="Their email" required error={touched ? errors.email : undefined} hint="Only so you can tell the list apart later.">
-        <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} onBlur={() => setTouched(true)}
-          placeholder="name@example.com" />
-      </Field>
-      <Field label="Access level">
-        <select value={grantedRole} onChange={(e) => setGrantedRole(e.target.value)}>
-          <option value="student">Student</option>
-          <option value="cr">Class representative</option>
-        </select>
-      </Field>
-      <button className="btn btn-primary" disabled={busy} type="submit">
-        <ExternalLink size={16} aria-hidden="true" /> {busy ? 'Granting…' : 'Approve access'}
-      </button>
-    </form>
+
+      {fixed ? (
+        <p className="field-hint" style={{ marginTop: 'var(--s2)' }}>
+          {isSelf
+            ? 'This is you. Change your own role from the Firebase console, so an accidental tap here cannot lock the class out.'
+            : 'Admins are set in the Firebase console only.'}
+        </p>
+      ) : (
+        <div style={{ marginTop: 'var(--s3)' }}>
+          <label className="sr-only" htmlFor={`role-${role.uid}`}>
+            Access for {role.email || role.uid}
+          </label>
+          <select
+            id={`role-${role.uid}`}
+            value={role.role}
+            disabled={busy}
+            onChange={(e) => change(e.target.value)}
+          >
+            {ROLE_CHOICES.map((c) => (
+              <option key={c.value} value={c.value}>{c.label}</option>
+            ))}
+          </select>
+          <p className="field-hint" style={{ marginTop: 6 }}>
+            {busy ? 'Saving…' : ROLE_CHOICES.find((c) => c.value === role.role)?.blurb}
+          </p>
+        </div>
+      )}
+    </div>
   );
 }

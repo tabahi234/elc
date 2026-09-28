@@ -24,8 +24,8 @@ export const GRADE_SCALE = [
 export const DEFAULT_COMPONENTS = [
   { name: 'Quizzes',      weight: 15, obtained: '', total: '' },
   { name: 'Assignments',  weight: 10, obtained: '', total: '' },
-  { name: 'Sessional I',  weight: 10, obtained: '', total: '' },
-  { name: 'Sessional II', weight: 15, obtained: '', total: '' },
+  { name: 'Mid I',        weight: 10, obtained: '', total: '' },
+  { name: 'Mid II',       weight: 15, obtained: '', total: '' },
   { name: 'Final',        weight: 50, obtained: '', total: '' }
 ];
 

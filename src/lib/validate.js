@@ -43,6 +43,9 @@ export const LIMITS = {
 
   // Timetable slots
   slotMinutes:  { min: 30, max: 300 },
+  // A paper. Shorter than a class at the bottom end (a 20-minute quiz is a
+  // real thing) and longer at the top (a three-hour final).
+  examMinutes:  { min: 15, max: 240 },
   dayStart:     '06:00',
   dayEnd:       '23:00',
 
@@ -50,8 +53,54 @@ export const LIMITS = {
   dueWindow:    { past: 365, future: 365 },
 };
 
-export const TASK_TYPES = ['Assignment', 'Quiz', 'Sessional', 'Final', 'Lab', 'Project', 'Presentation'];
+export const TASK_TYPES = ['Assignment', 'Quiz', 'Mid', 'Final', 'Lab', 'Project', 'Presentation'];
 export const SLOT_TYPES = ['Lecture', 'LAB', 'Tutorial', 'Online'];
+// Mirrored exactly in firestore.rules. Named the way this university names
+// them — mids, not sessionals — so a student cross-checking a notice board
+// sees the same words. There is one 'Mid' rather than a numbered pair: each
+// entry carries its own date and subject, so two mid-terms are simply two
+// entries, and a list that offers "Mid II" to a course with one mid is a list
+// that invites the wrong answer.
+export const EXAM_KINDS = ['Mid', 'Final', 'Lab exam', 'Quiz'];
+
+/**
+ * Types that are no longer offered but still exist in the database.
+ *
+ * 'Sessional' was what mids used to be called here. Records written under it
+ * are still perfectly valid — they are somebody's real quiz from last month —
+ * so they stay readable, editable and correctly treated as events. They are
+ * just not on any menu any more, so no new one can be created.
+ */
+export const LEGACY_TASK_TYPES = ['Sessional'];
+export const ALL_TASK_TYPES = [...TASK_TYPES, ...LEGACY_TASK_TYPES];
+
+/**
+ * The type list to show in a form, with whatever the record already says
+ * folded in.
+ *
+ * Without this, opening an old 'Sessional' deadline would show a dropdown that
+ * does not contain its own value: the browser silently falls back to the first
+ * option, and saving quietly retypes the record as an Assignment.
+ */
+export const typeOptions = (current) =>
+  (current && !TASK_TYPES.includes(current) ? [...TASK_TYPES, current] : TASK_TYPES);
+
+/**
+ * The types that are sat rather than handed in.
+ *
+ * A quiz is not a to-do. You cannot start it early, hand it in late, or tick
+ * it off: it happens on one day, at one time, and then it is over. Treating it
+ * as a task gave every student a checkbox that meant nothing and a "pending"
+ * entry that stayed pending for the rest of the semester unless they went and
+ * lied to it. Anything in this list is shown as an event and loses its tick
+ * box; the calendar decides when it stops being relevant.
+ */
+export const EVENT_TYPES = ['Quiz', 'Mid', 'Sessional', 'Final'];
+export const isEventType = (type) => EVENT_TYPES.includes(type);
+
+/** An event whose date has passed. Nothing to do about it either way. */
+export const eventIsOver = (task) =>
+  isEventType(task?.type) && Boolean(task?.dueDate) && daysFromToday(task.dueDate) < 0;
 
 // ── small helpers ────────────────────────────────────────────────────────────
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -382,7 +431,9 @@ export function vTask(task, { requireDueDate = true } = {}) {
   const title = vText(task.title, { ...LIMITS.title, label: 'Title' });
   if (title) errors.title = title;
   if (!task.subject) errors.subject = 'Pick a subject.';
-  if (!TASK_TYPES.includes(task.type)) errors.type = 'Pick a type.';
+  // Accepts a type that is no longer offered, so editing an old record does
+  // not fail validation on a field nobody touched.
+  if (!ALL_TASK_TYPES.includes(task.type)) errors.type = 'Pick a type.';
   const due = vDueDate(task.dueDate, { required: requireDueDate });
   if (due) errors.dueDate = due;
   const time = vTime(task.dueTime, { label: 'Due time' });
@@ -453,6 +504,82 @@ export function vClassChange(change, existing = []) {
     if (clash) errors.slotId = 'That class already has a change on that date.';
   }
 
+  return errors;
+}
+
+// ── exams ────────────────────────────────────────────────────────────────────
+/**
+ * One sitting: a subject, a date, a window and a room.
+ *
+ * Every field is required except the seat and the note, because an exam entry
+ * that is missing its room is worse than no entry at all — it looks
+ * authoritative and sends people to the wrong building.
+ */
+export function vExam(exam, others = []) {
+  const errors = {};
+
+  if (!exam.code) errors.code = 'Pick a subject.';
+  if (!EXAM_KINDS.includes(exam.kind)) errors.kind = 'Pick which exam this is.';
+
+  const date = vDueDate(exam.date, { required: true });
+  if (date) errors.date = date;
+
+  const startError = vTime(exam.start, { required: true, label: 'Start time' });
+  const endError = vTime(exam.end, { required: true, label: 'End time' });
+  if (startError) errors.start = startError;
+  if (endError) errors.end = endError;
+
+  if (!startError && !endError) {
+    const span = toMinutes(exam.end) - toMinutes(exam.start);
+    if (span <= 0) errors.end = 'It has to end after it starts.';
+    else if (span < LIMITS.examMinutes.min) errors.end = `An exam is at least ${LIMITS.examMinutes.min} minutes.`;
+    else if (span > LIMITS.examMinutes.max) errors.end = `That is ${(span / 60).toFixed(1)} hours, longer than any paper (max ${LIMITS.examMinutes.max / 60}h).`;
+  }
+
+  const room = vText(exam.room, { ...LIMITS.room, label: 'Room' });
+  if (room) errors.room = room;
+
+  const seat = vOptionalText(exam.seat, { max: 24, label: 'Seat number' });
+  if (seat) errors.seat = seat;
+
+  const note = vOptionalText(exam.note, { max: 140, label: 'Note' });
+  if (note) errors.note = note;
+
+  // The same paper entered twice is how half a class ends up reading the old
+  // room and the other half the new one.
+  if (exam.code && exam.kind && exam.date) {
+    const clash = others.find((o) =>
+      o.id !== exam.id && o.code === exam.code && o.kind === exam.kind && o.date === exam.date);
+    if (clash) errors.kind = `That ${exam.kind} is already on the schedule for that date.`;
+  }
+
+  return errors;
+}
+
+/**
+ * The switch that suspends the weekly timetable.
+ *
+ * Leaving both dates empty is allowed and means "on until I turn it off",
+ * which is what a CR reaches for mid-exam-week. The form pushes for dates
+ * anyway, because a switch nobody remembers to turn off hides the timetable
+ * from the whole class for a month.
+ */
+export function vExamMode(config) {
+  const errors = {};
+  const label = vOptionalText(config.label, { max: 60, label: 'Name' });
+  if (label) errors.label = label;
+
+  if (config.from) {
+    const from = vDueDate(config.from, { required: false });
+    if (from) errors.from = from;
+  }
+  if (config.to) {
+    const to = vDueDate(config.to, { required: false });
+    if (to) errors.to = to;
+  }
+  if (!errors.from && !errors.to && config.from && config.to && config.to < config.from) {
+    errors.to = 'The last day cannot be before the first.';
+  }
   return errors;
 }
 

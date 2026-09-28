@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from 'react';
-import { daysFromToday, todayIso } from './validate';
+import { daysFromToday, todayIso, isEventType } from './validate';
 import { describeChange } from './schedule';
+import { upcomingExams } from './exams';
 
 /**
  * Turns the app's state into a ranked list of things the student has to act
@@ -16,14 +17,18 @@ export function roomChanges(timetable) {
   return timetable.filter((s) => s.changeNote && (!s.changeUntil || s.changeUntil >= today));
 }
 
-export function buildAlerts({ tasks = [], subjects = {}, timetable = [], changes = [] }) {
+export function buildAlerts({ tasks = [], subjects = {}, timetable = [], changes = [], exams = [] }) {
   const alerts = [];
   // A deadline with no announced date cannot be urgent yet, so it is left out
   // of everything here rather than treated as due today.
   const pending = tasks.filter((t) => !t.completed && t.dueDate);
+  // Exams are handled separately below. "3 deadlines due today", counting a
+  // quiz somebody is about to walk into, is the wrong sentence about the wrong
+  // thing, and the one part of it nobody can act on.
+  const due = pending.filter((t) => !isEventType(t.type));
   const label = (t) => `${subjects[t.subject]?.short || t.subject}: ${t.title}`;
 
-  const overdue = pending.filter((t) => daysFromToday(t.dueDate) < 0);
+  const overdue = due.filter((t) => daysFromToday(t.dueDate) < 0);
   if (overdue.length) {
     alerts.push({
       id: 'overdue',
@@ -34,7 +39,7 @@ export function buildAlerts({ tasks = [], subjects = {}, timetable = [], changes
     });
   }
 
-  const dueToday = pending.filter((t) => daysFromToday(t.dueDate) === 0);
+  const dueToday = due.filter((t) => daysFromToday(t.dueDate) === 0);
   if (dueToday.length) {
     alerts.push({
       id: 'due-today',
@@ -45,7 +50,7 @@ export function buildAlerts({ tasks = [], subjects = {}, timetable = [], changes
     });
   }
 
-  const dueTomorrow = pending.filter((t) => daysFromToday(t.dueDate) === 1);
+  const dueTomorrow = due.filter((t) => daysFromToday(t.dueDate) === 1);
   if (dueTomorrow.length) {
     alerts.push({
       id: 'due-tomorrow',
@@ -56,20 +61,31 @@ export function buildAlerts({ tasks = [], subjects = {}, timetable = [], changes
     });
   }
 
-  // Quizzes and sessionals get their own heads-up, because unlike an
-  // assignment you cannot hand one in late.
-  const examSoon = pending.filter((t) => {
-    if (!['Quiz', 'Sessional', 'Final'].includes(t.type)) return false;
+  // Anything sat rather than handed in gets its own line and a longer horizon
+  // than a deadline, because you cannot do one late and revising for one
+  // starts well before the night before.
+  for (const t of pending.filter((x) => isEventType(x.type))) {
     const d = daysFromToday(t.dueDate);
-    return d >= 2 && d <= 5;
-  });
-  for (const t of examSoon) {
+    if (d < 0 || d > 7) continue;
     alerts.push({
       id: `exam-${t.id}`,
-      severity: 'warning',
+      severity: d <= 1 ? 'critical' : 'warning',
       to: '/tasks',
-      title: `${t.type}: ${subjects[t.subject]?.short || t.subject} in ${daysFromToday(t.dueDate)} days`,
+      title: `${t.type}: ${subjects[t.subject]?.short || t.subject} ${whenText(d)}`,
       detail: t.title,
+    });
+  }
+
+  // The published exam schedule is a different thing again: a room and a seat
+  // at a fixed hour, so this alert carries where to go rather than what to do.
+  for (const exam of upcomingExams(exams, 7)) {
+    const d = daysFromToday(exam.date);
+    alerts.push({
+      id: `sitting-${exam.id}`,
+      severity: d <= 1 ? 'critical' : 'warning',
+      to: '/timetable',
+      title: `${exam.kind}: ${subjects[exam.code]?.short || exam.code} ${whenText(d)}`,
+      detail: `${exam.start} · ${exam.room}${exam.seat ? `, seat ${exam.seat}` : ''}`,
     });
   }
 
@@ -102,6 +118,9 @@ export function buildAlerts({ tasks = [], subjects = {}, timetable = [], changes
 
   return alerts.sort((a, b) => SEVERITY[a.severity] - SEVERITY[b.severity]);
 }
+
+/** "today", "tomorrow", "in 4 days" — phrased the same way everywhere. */
+const whenText = (days) => (days === 0 ? 'today' : days === 1 ? 'tomorrow' : `in ${days} days`);
 
 export const alertTone = (severity) =>
   severity === 'critical' ? 'danger' : severity === 'warning' ? 'warning' : 'accent';
@@ -144,8 +163,12 @@ export function useDeadlineNotifications(tasks, subjects) {
     if (!urgent.length) return null;
     const lines = urgent.slice(0, 4).map((t) => {
       const d = daysFromToday(t.dueDate);
-      const when = d < 0 ? 'overdue' : d === 0 ? 'today' : 'tomorrow';
-      return `${subjects[t.subject]?.short || t.subject}: ${t.title} (${when})`;
+      // An exam is never "overdue", so the one word that would be wrong about
+      // it is the one this has to avoid.
+      const timing = isEventType(t.type)
+        ? (d === 0 ? 'today' : 'tomorrow')
+        : (d < 0 ? 'overdue' : d === 0 ? 'today' : 'tomorrow');
+      return `${subjects[t.subject]?.short || t.subject}: ${t.title} (${timing})`;
     });
     if (urgent.length > 4) lines.push(`+${urgent.length - 4} more`);
     return { count: urgent.length, body: lines.join('\n') };
@@ -158,7 +181,7 @@ export function useDeadlineNotifications(tasks, subjects) {
     if (readStore(LAST_NOTIFIED_KEY) === today) return;
     writeStore(LAST_NOTIFIED_KEY, today);
     try {
-      new Notification(`${summary.count} deadline${summary.count === 1 ? '' : 's'} need you today`, {
+      new Notification(`${summary.count} thing${summary.count === 1 ? '' : 's'} need you today`, {
         body: summary.body,
         tag: 'unihelper-deadlines',
         icon: '/icon-192.png',

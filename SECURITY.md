@@ -2,14 +2,17 @@
 
 ## Changes
 
-- Require verified identity and explicit approval in `roles/{uid}` for shared
+- Require verified identity and a `roles/{uid}` document for shared
   class reads and private-record access. An absent role no longer grants access.
 - Restrict other users' role/email records to admins. Keep admin-role creation
   outside the client and prevent changes to existing admins.
 - Gate the UI on a server-confirmed role tied to the current user. Remount
   private screens on account changes and clear memory on explicit sign-out.
 - Replace persistent Firestore caching with memory caching, remove the previous
-  IndexedDB cache before startup, and use session auth persistence. Multiple
+  IndexedDB cache before startup, and keep the auth token in local persistence.
+  The records and the sign-in are separate concerns: records stay memory-only
+  and die with the tab, while the token survives a restart so students are not
+  re-authenticating several times a day for no privacy gain. Multiple
   tabs running the old app must close before the cache migration can complete.
 - Require server-generated creation timestamps for shared tasks/notices and
   server-generated update timestamps for private documents. Historical ISO
@@ -43,16 +46,23 @@ origin. Live Firebase settings and deployed rules were not inspected or changed.
 
 1. Confirm an existing trusted administrator has `roles/<uid> = {role: "admin"}`
    in Firebase. Do not remove current admin records.
-2. Provision `student` roles for existing approved users, or have the admin
-   approve them through Manage → People after rollout. Otherwise those users
-   will see the approval screen. No identity is auto-approved from an email.
+2. Nothing to provision. Existing users keep the roles they have, and anyone
+   without one enrols themselves as `student` on their next visit. Review
+   Manage → People afterwards and set anyone who should not be in the class to
+   **No access**, which writes `role: blocked`; deleting the row instead would
+   let them straight back in.
 3. Publish `firestore.rules` and the new built app together. Rules only become
    effective on the live database after `npm run deploy:rules` succeeds.
 4. Firebase Hosting headers are configured in `firebase.json`; `public/_headers`
    covers hosts that support that format. Other hosts must configure equivalent
    HTTP headers. Check actual response headers after deployment.
-5. Test Google sign-in, approval, revocation, private saves and sign-out on the
-   deployed origin. If another old tab blocks cache cleanup, close it and retry.
+5. Test Google sign-in, first-visit enrolment, blocking, private saves and
+   sign-out on the deployed origin. Sign-in now survives closing the browser,
+   so confirm sign-out still ends it. If another old tab blocks cache cleanup,
+   close it and retry.
+6. Everyone is asked to agree to the notices again on their next visit:
+   `CONSENT_VERSION` is 4, because self-enrolment and device-persistent
+   sign-in both change what is being agreed to.
 
 ## Boundaries and remaining operational work
 

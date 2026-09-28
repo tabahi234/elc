@@ -8,10 +8,15 @@ rules_version = '2';
 //  enforced only in the React code. Anything a student must not do is denied
 //  here.
 //
-//  Roles live in /roles/{uid}. A user's own role doc is readable by them but
-//  writable only by an admin, and the 'admin' role itself can only ever be
-//  granted from the Firebase console (or Admin SDK) — see /roles below. That
-//  makes privilege escalation from the client impossible.
+//  Roles live in /roles/{uid}. Anyone who signs in may create their OWN doc,
+//  once, and only as 'student' — that is the whole sign-up. Every later change
+//  to it is an admin's, and the 'admin' role itself can only ever be granted
+//  from the Firebase console (or Admin SDK) — see /roles below. So a classmate
+//  can let themselves in, and nobody can promote themselves past student.
+//
+//  'blocked' is how access is taken away again. Self-enrolment is create-only,
+//  so somebody who has been blocked cannot overwrite their own doc to get back
+//  in; deleting the doc instead would simply let them sign up again.
 //
 //  Bootstrapping the first admin (one time, Firebase console → Firestore):
 //      collection: roles   document id: <your-uid>   { role: "admin" }
@@ -90,14 +95,30 @@ service cloud.firestore {
       function validRole() {
         return request.resource.data.keys().hasOnly(['role', 'email', 'updatedAt', 'updatedBy'])
             // 'admin' is deliberately NOT grantable from the client.
-            && request.resource.data.role in ['cr', 'student']
+            && request.resource.data.role in ['cr', 'student', 'blocked']
             && str(request.resource.data.email, 3, 200)
             && stamped();
       }
+
+      // Signing up. Whoever signs in files their own doc as a plain student,
+      // under their own uid, carrying the email on their own verified token.
+      // It is a create and never an update, so it can happen exactly once: it
+      // cannot overwrite a CR appointment and it cannot undo a block.
+      function selfEnrolment() {
+        return signedIn()
+            && uid == request.auth.uid
+            && request.resource.data.keys().hasOnly(['role', 'email', 'updatedAt', 'updatedBy'])
+            && request.resource.data.role == 'student'
+            && request.resource.data.email == request.auth.token.email
+            && str(request.resource.data.email, 3, 200)
+            && stamped();
+      }
+
       // An admin can appoint or demote a CR, but never touches their own doc
       // and never edits another admin — so the admin set can only change from
       // the Firebase console.
-      allow create: if isAdmin() && uid != request.auth.uid && validRole();
+      allow create: if selfEnrolment()
+                    || (isAdmin() && uid != request.auth.uid && validRole());
       allow update: if isAdmin() && uid != request.auth.uid && validRole()
                     && resource.data.role != 'admin';
       allow delete: if isAdmin() && uid != request.auth.uid
@@ -165,7 +186,10 @@ service cloud.firestore {
             && d.keys().hasAll(['title','subject','type','dueDate'])
             && str(d.title, 3, 120)
             && subjectCode(d.subject) && subjectExists(d.subject)
-            && d.type in ['Assignment','Quiz','Sessional','Final','Lab','Project','Presentation']
+            // 'Sessional' is what mids used to be called. It is still accepted
+            // so existing records stay editable; it is no longer offered in
+            // any form, so nothing new can be written under it.
+            && d.type in ['Assignment','Quiz','Mid','Sessional','Final','Lab','Project','Presentation']
             // Nullable on purpose: a deadline is often announced before its
             // date is fixed, and the class should hear about it either way.
             && (d.dueDate == null || isoDate(d.dueDate))
@@ -240,6 +264,54 @@ service cloud.firestore {
                     && request.resource.data.createdBy == resource.data.createdBy
                     && request.resource.data.createdAt == resource.data.createdAt;
       allow delete: if manages();
+    }
+
+    // ── /exams/{id} — one sitting of a sessional, final or lab exam ─────────
+    // An exam is not a task. It happens at a time, in a room, and then it is
+    // over; nobody ticks it off. It carries a seat number because that is the
+    // thing people hunt for in a group chat ten minutes before sitting down.
+    match /exams/{examId} {
+      allow read: if isMember();
+
+      function validExam() {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['code','kind','date','start','end','room',
+                                 'seat','note','updatedAt','updatedBy'])
+            && d.keys().hasAll(['code','kind','date','start','end','room'])
+            && subjectCode(d.code) && subjectExists(d.code)
+            && d.kind in ['Mid','Final','Lab exam','Quiz']
+            && isoDate(d.date)
+            && hhmm(d.start) && hhmm(d.end)
+            && d.end > d.start
+            && str(d.room, 1, 24)
+            && (!('seat' in d) || str(d.seat, 0, 24))
+            && (!('note' in d) || str(d.note, 0, 140))
+            && stamped();
+      }
+      allow create, update: if manages() && validExam();
+      allow delete:         if manages();
+    }
+
+    // ── /config/{docId} — class-wide switches ───────────────────────────────
+    // Exactly one document is allowed to exist: examMode, which says the weekly
+    // timetable is suspended and the exam schedule is what is actually on.
+    match /config/{docId} {
+      allow read: if isMember();
+
+      function validExamMode() {
+        let d = request.resource.data;
+        return docId == 'examMode'
+            && d.keys().hasOnly(['active','label','from','to','updatedAt','updatedBy'])
+            && d.keys().hasAll(['active','from','to'])
+            && d.active is bool
+            && (!('label' in d) || str(d.label, 0, 60))
+            && (d.from == '' || isoDate(d.from))
+            && (d.to == '' || isoDate(d.to))
+            && (d.from == '' || d.to == '' || d.to >= d.from)
+            && stamped();
+      }
+      allow create, update: if manages() && validExamMode();
+      allow delete:         if manages() && docId == 'examMode';
     }
 
     // ── /users/{uid} — private per-student data ─────────────────────────────

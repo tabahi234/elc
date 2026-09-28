@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   CalendarDays, FolderOpen, Users, Timer, GraduationCap, Megaphone,
-  ChevronRight, ChevronLeft, Check,
+  ChevronRight, ChevronLeft, Check, FileText,
 } from 'lucide-react';
 
 /**
@@ -32,6 +32,11 @@ const STEPS = [
     icon: Users,
     title: 'Class deadlines and your own',
     body: 'Anything your representative announces appears on your list automatically, marked Class. You can tick it off. Some arrive before the date is fixed and say so until it is. If you want to reword one, move the date, or add your own notes, tap the copy icon to make a private version you control, and you will be told if the class version changes later.',
+  },
+  {
+    icon: FileText,
+    title: 'Exams are not tasks',
+    body: 'A quiz, sessional or final sits in its own list on Deadlines, with a countdown and no tick box — you cannot start one early or hand one in late, so there is nothing to mark done, and it folds itself away once the date has passed. When your representative publishes the date sheet, the room and the seat show up on Classes, and during exam week the timetable steps aside for it.',
   },
   {
     icon: Timer,

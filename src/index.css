@@ -1043,3 +1043,39 @@ svg[class*='lucide'] { stroke-width: 1.75; }
 }
 .consent-text { line-height: 1.5; }
 .consent-text label { cursor: pointer; }
+
+/* ---- a task row that opens ------------------------------------------------- */
+/* The body of a task or exam card is a button that opens the full record. It
+   has to look like the text it replaced, not like a control: no background, no
+   border, inherited colour, and left aligned, because a centred task title in
+   a left aligned list reads as a mistake. The focus ring is kept — this is the
+   primary way into a record, so it has to be reachable from the keyboard. */
+.task-open {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.task-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: var(--r-chip);
+}
+
+/* A note preview, so one wordy assignment cannot bury five others. The whole
+   note is in the sheet the row opens. Applied to the text itself, never to a
+   flex row: -webkit-box would take the layout over and drop the icon onto its
+   own line above the words. */
+.clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-width: 0;
+}
