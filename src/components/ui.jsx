@@ -56,6 +56,13 @@ export function Sheet({ open, onClose, title, subtitle, children, footer, labell
   const panel = useRef(null);
   const restoreTo = useRef(null);
   const headingId = useId();
+  // Every caller passes an inline arrow, so onClose is a new function on each
+  // render. Kept in a ref so the effect below runs once per opening: with it
+  // as a dependency, any re-render of the screen behind (a live Firestore
+  // update, the dashboard clock) tore the effect down and yanked focus back to
+  // the first field while someone was typing in another.
+  const closeRef = useRef(onClose);
+  useEffect(() => { closeRef.current = onClose; });
 
   useEffect(() => {
     if (!open) return;
@@ -71,7 +78,7 @@ export function Sheet({ open, onClose, title, subtitle, children, footer, labell
     (first ?? panel.current)?.focus?.();
 
     const onKeyDown = (e) => {
-      if (e.key === 'Escape') { e.stopPropagation(); onClose(); return; }
+      if (e.key === 'Escape') { e.stopPropagation(); closeRef.current(); return; }
       if (e.key !== 'Tab') return;
       const focusable = panel.current?.querySelectorAll(
         'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
@@ -89,7 +96,7 @@ export function Sheet({ open, onClose, title, subtitle, children, footer, labell
       document.body.style.overflow = overflow;
       restoreTo.current?.focus?.();
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 

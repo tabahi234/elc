@@ -18,6 +18,7 @@ import {
   dueDateHint, safeLink, daysFromToday,
 } from '../lib/validate';
 import { friendlyError } from '../lib/errors';
+import { settle } from '../lib/writes';
 import { classesOn, upcomingChanges, describeChange, changeIsPast } from '../lib/schedule';
 import { isLive } from '../lib/announcements';
 import {
@@ -36,6 +37,17 @@ const PALETTE = ['#5b93ce', '#45a79f', '#4fa87b', '#88a852', '#cfa153', '#cf7f63
 
 const prettyTime = (t) => (t ? format(parse(t, 'HH:mm', new Date()), 'h:mm a') : '');
 const prettyDate = (iso) => format(new Date(`${iso}T00:00:00`), 'EEE d MMM');
+
+/**
+ * A form's starting values, with every listed field that is null or missing
+ * turned into an empty string. Older records lack some fields and an undated
+ * deadline stores null, and an input given null or undefined as its value
+ * silently stops being controlled by React.
+ */
+const withBlanks = (record, keys) => ({
+  ...record,
+  ...Object.fromEntries(keys.map((k) => [k, record[k] ?? ''])),
+});
 
 /**
  * Push something into the class group chat.
@@ -270,7 +282,7 @@ function TaskRow({ task, subjects, onEdit, onDelete }) {
 }
 
 function TaskSheet({ task, subjects, onClose, onSave }) {
-  const [form, setForm] = useState(task);
+  const [form, setForm] = useState(() => withBlanks(task, ['dueDate', 'dueTime', 'note']));
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   // The date is optional on purpose: a teacher often announces an assignment
@@ -503,7 +515,7 @@ function NoticeRow({ announcement, onEdit, onDelete, expired }) {
 }
 
 function NoticeSheet({ announcement, onClose, onSave }) {
-  const [form, setForm] = useState(announcement);
+  const [form, setForm] = useState(() => withBlanks(announcement, ['body', 'until']));
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -623,7 +635,15 @@ function ExamsTab() {
 
   return (
     <div className="stack">
-      <ExamModeCard config={examMode} examCount={ahead.length} />
+      {/* Keyed on the saved settings: the form copies them once when it
+          mounts, so on a cold open straight to this tab it showed "off" from
+          before the real settings arrived, and saving would have switched
+          exams off for the whole class. It also picks up another CR's change. */}
+      <ExamModeCard
+        key={[examMode.active, examMode.label, examMode.from, examMode.to].join('|')}
+        config={examMode}
+        examCount={ahead.length}
+      />
 
       <hr className="divider" style={{ marginTop: 'var(--s2)' }} />
 
@@ -861,7 +881,7 @@ function ExamRow({ exam, subjects, onEdit, onDelete, past }) {
 }
 
 function ExamSheet({ exam, subjects, existing, onClose, onSave }) {
-  const [form, setForm] = useState(exam);
+  const [form, setForm] = useState(() => withBlanks(exam, ['room', 'seat', 'note']));
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -1043,7 +1063,10 @@ function SubjectsTab() {
 
 function SubjectSheet({ subject, existingCodes, onClose, onSave }) {
   const isNew = !existingCodes.includes(subject.code);
-  const [form, setForm] = useState({ ...subject, code: subject.code || '' });
+  const [form, setForm] = useState(() => ({
+    ...withBlanks(subject, ['teacher', 'driveLink', 'classroomLink']),
+    code: subject.code || '',
+  }));
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -1304,7 +1327,7 @@ function TimetableTab() {
 }
 
 function SlotSheet({ slot, subjects, others, onClose, onSave }) {
-  const [form, setForm] = useState(slot);
+  const [form, setForm] = useState(() => withBlanks(slot, ['room', 'changeNote', 'changeUntil']));
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const errors = vSlot(form, others);
@@ -1450,7 +1473,10 @@ function ChangesSection() {
   const report = useCommitToast();
   const [editing, setEditing] = useState(null);
 
-  const upcoming = upcomingChanges(classChanges, 45);
+  // Every change still ahead, however far. A date can be set up to a year out,
+  // and a 45-day window here left anything further away in neither list, so
+  // there was no way to edit or delete it until it came into range.
+  const upcoming = upcomingChanges(classChanges, 366);
   const past = classChanges.filter(changeIsPast).reverse();
 
   const remove = async (change) => {
@@ -1581,7 +1607,8 @@ function ChangeRow({ change, subjects, timetable, onEdit, onDelete, past }) {
 }
 
 function ChangeSheet({ change, subjects, timetable, existing, onClose, onSave }) {
-  const [form, setForm] = useState(change);
+  const [form, setForm] = useState(() =>
+    withBlanks(change, ['slotId', 'start', 'end', 'room', 'type', 'note']));
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -1605,10 +1632,30 @@ function ChangeSheet({ change, subjects, timetable, existing, onClose, onSave })
    * an extra class that has no slot.
    */
   const chooseKind = (status) => setForm((f) => {
+    // A cancellation is saved with type '', which is not an option in the type
+    // picker: switching an existing one to "extra" left a select showing
+    // "Lecture" over a value the validator kept rejecting.
     if (status === 'extra') {
-      return { ...f, status, slotId: '', start: f.start || '', end: f.end || '', room: f.room || '' };
+      return {
+        ...f, status, slotId: '',
+        start: f.start || '', end: f.end || '', room: f.room || '',
+        type: SLOT_TYPES.includes(f.type) ? f.type : 'Lecture',
+      };
     }
-    if (status === 'cancelled') return { ...f, status };
+    // Moving a class already picked while on "cancelled" starts from where it
+    // normally is, the same as picking it fresh would.
+    if (status === 'moved' && f.slotId) {
+      const slot = scheduled.find((s) => s.id === f.slotId);
+      if (slot) {
+        return {
+          ...f, status,
+          start: f.start || slot.start,
+          end: f.end || slot.end,
+          room: f.room || slot.room,
+          type: SLOT_TYPES.includes(f.type) ? f.type : slot.type,
+        };
+      }
+    }
     return { ...f, status };
   });
 
@@ -1920,20 +1967,22 @@ function RoleRow({ role, isSelf }) {
     if (next === role.role) return;
     setBusy(true);
     try {
-      await setDoc(doc(db, 'roles', role.uid), {
+      // settle(): offline, the bare promise never resolves and the row would
+      // sit on "Saving…" until the connection came back.
+      const { queued } = await settle(setDoc(doc(db, 'roles', role.uid), {
         role: next,
         // Resent unchanged: the rules require an email on every write, and the
         // one already on the document is the one they signed in with.
         email: role.email || '',
         updatedAt: serverTimestamp(),
         updatedBy: user.uid,
-      });
+      }));
       const said = {
         cr: `${role.email || 'They'} can now edit class content.`,
         student: `${role.email || 'They'} is back to a normal student.`,
         blocked: `${role.email || 'They'} has been removed from the class.`,
       };
-      report({ ok: true }, said[next]);
+      report({ ok: true, queued }, said[next]);
     } catch (error) {
       report({ ok: false, error });
     }

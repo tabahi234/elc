@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { lazy, Suspense, useEffect, useState } from 'react';
 import {
   BrowserRouter as Router, Routes, Route, useLocation,
 } from 'react-router-dom';
@@ -16,14 +16,41 @@ import Consent, { LegalDocument } from './components/Consent';
 import Onboarding from './components/Onboarding';
 import InstallPrompt from './components/InstallPrompt';
 import Dashboard from './pages/Dashboard';
-import Timetable from './pages/Timetable';
-import Tasks from './pages/Tasks';
-import Grades from './pages/Grades';
-import Focus from './pages/Focus';
 import Login from './pages/Login';
-import Admin from './pages/Admin';
 import NotFound from './pages/NotFound';
 import BottomNav from './components/BottomNav';
+
+// The dashboard is what opens, so it ships in the main bundle. Every other
+// screen is its own chunk, fetched on first visit (and precached by the service
+// worker, so offline they still open instantly).
+//
+// After a deploy, a phone still running the previous version asks for chunk
+// file names that no longer exist, and the screen fails to load. One reload
+// picks up the new version; the session flag stops a genuinely broken chunk
+// from reloading in a loop, and is cleared by any chunk that loads fine.
+const RELOADED_KEY = 'unihelper:chunkReload';
+const page = (load) => lazy(() => load().then(
+  (module) => {
+    try { sessionStorage.removeItem(RELOADED_KEY); } catch { /* private mode */ }
+    return module;
+  },
+  (error) => {
+    let reloaded = true;
+    try {
+      reloaded = sessionStorage.getItem(RELOADED_KEY) === '1';
+      if (!reloaded) sessionStorage.setItem(RELOADED_KEY, '1');
+    } catch { /* private mode: fall through to the error screen */ }
+    if (reloaded) throw error;
+    window.location.reload();
+    return new Promise(() => {}); // the reload replaces the page
+  },
+));
+
+const Timetable = page(() => import('./pages/Timetable'));
+const Tasks = page(() => import('./pages/Tasks'));
+const Grades = page(() => import('./pages/Grades'));
+const Focus = page(() => import('./pages/Focus'));
+const Admin = page(() => import('./pages/Admin'));
 
 /**
  * Client-side gate for the admin route.
@@ -62,17 +89,19 @@ function Screens() {
 
   return (
     <ErrorBoundary key={pathname} fullPage={false}>
-      <Routes>
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/timetable" element={<Timetable />} />
-        <Route path="/tasks" element={<Tasks />} />
-        <Route path="/grades" element={<Grades />} />
-        <Route path="/focus" element={<Focus />} />
-        <Route path="/admin" element={<RequireManager><Admin /></RequireManager>} />
-        <Route path="/privacy" element={<LegalDocument doc={PRIVACY} />} />
-        <Route path="/terms" element={<LegalDocument doc={TERMS} />} />
-        <Route path="*" element={<NotFound />} />
-      </Routes>
+      <Suspense fallback={<p className="muted">Loading…</p>}>
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/timetable" element={<Timetable />} />
+          <Route path="/tasks" element={<Tasks />} />
+          <Route path="/grades" element={<Grades />} />
+          <Route path="/focus" element={<Focus />} />
+          <Route path="/admin" element={<RequireManager><Admin /></RequireManager>} />
+          <Route path="/privacy" element={<LegalDocument doc={PRIVACY} />} />
+          <Route path="/terms" element={<LegalDocument doc={TERMS} />} />
+          <Route path="*" element={<NotFound />} />
+        </Routes>
+      </Suspense>
     </ErrorBoundary>
   );
 }
@@ -119,11 +148,11 @@ function Gated({ signInConsent }) {
   if (!accepted) {
     return (
       <Consent
-        onAccept={() => setSettings({
-          ...settings,
+        onAccept={() => setSettings((current) => ({
+          ...current,
           consentVersion: CONSENT_VERSION,
           consentAt: new Date().toISOString(),
-        })}
+        }))}
       />
     );
   }
@@ -141,7 +170,7 @@ function Gated({ signInConsent }) {
 
       {!settings.tourDoneAt && (
         <Onboarding
-          onDone={() => setSettings({ ...settings, tourDoneAt: new Date().toISOString() })}
+          onDone={() => setSettings((current) => ({ ...current, tourDoneAt: new Date().toISOString() }))}
         />
       )}
     </ClassDataProvider>

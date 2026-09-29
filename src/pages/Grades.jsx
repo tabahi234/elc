@@ -11,7 +11,7 @@ import { vGradebook, vCredits, vPrevCgpa, vPrevCredits } from '../lib/validate';
 export default function Grades() {
   const { subjects } = useClassData();
   const [book, setBook] = useGradeBook();
-  const [credits, setCredits] = useCredits();
+  const [credits, setCredit] = useCredits();
   const [profile, setProfile] = useProfile();
   const [open, setOpen] = useState(null);
 
@@ -72,7 +72,7 @@ export default function Grades() {
                 type="number" inputMode="decimal" step="0.01" min="0" max="4"
                 placeholder="3.20"
                 value={profile.prevCgpa}
-                onChange={(e) => setProfile({ ...profile, prevCgpa: e.target.value })}
+                onChange={(e) => { const v = e.target.value; setProfile((cur) => ({ ...cur, prevCgpa: v })); }}
               />
             </Field>
             <Field label="Credit hours done" error={prevCreditsError}>
@@ -80,7 +80,7 @@ export default function Grades() {
                 type="number" inputMode="numeric" min="0" max="300"
                 placeholder="34"
                 value={profile.prevCredits}
-                onChange={(e) => setProfile({ ...profile, prevCredits: e.target.value })}
+                onChange={(e) => { const v = e.target.value; setProfile((cur) => ({ ...cur, prevCredits: v })); }}
               />
             </Field>
           </div>
@@ -103,8 +103,8 @@ export default function Grades() {
             credits={credits[code] ?? s.credits}
             isOpen={open === code}
             onToggleOpen={() => setOpen(open === code ? null : code)}
-            onChange={(next) => setBook({ ...book, [code]: next })}
-            onCredits={(value) => setCredits({ ...credits, [code]: value })}
+            onChange={(next) => setBook((cur) => ({ ...cur, [code]: next }))}
+            onCredits={(value) => setCredit(code, value)}
           />
         ))}
 

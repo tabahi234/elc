@@ -147,6 +147,7 @@ export async function requestNotifications() {
 
 const readStore = (key) => { try { return localStorage.getItem(key); } catch { return null; } };
 const writeStore = (key, value) => { try { localStorage.setItem(key, value); } catch { /* private mode */ } };
+const removeStore = (key) => { try { localStorage.removeItem(key); } catch { /* private mode */ } };
 
 /**
  * Fires one summary notification per day when something is due today or
@@ -179,15 +180,39 @@ export function useDeadlineNotifications(tasks, subjects) {
     if (notificationPermission() !== 'granted') return;
     const today = todayIso();
     if (readStore(LAST_NOTIFIED_KEY) === today) return;
+    // Claimed before the async call so a second render cannot send a duplicate,
+    // and handed back if nothing was shown, so a failure is not a lost day.
     writeStore(LAST_NOTIFIED_KEY, today);
-    try {
-      new Notification(`${summary.count} thing${summary.count === 1 ? '' : 's'} need you today`, {
-        body: summary.body,
-        tag: 'unihelper-deadlines',
-        icon: '/icon-192.png',
-      });
-    } catch { /* some browsers only allow this from a service worker */ }
+    showNotification(`${summary.count} thing${summary.count === 1 ? '' : 's'} need you today`, {
+      body: summary.body,
+      tag: 'unihelper-deadlines',
+      icon: '/icon-192.png',
+    }).then((shown) => { if (!shown) removeStore(LAST_NOTIFIED_KEY); });
   }, [summary]);
 
   return summary;
+}
+
+/**
+ * Android Chrome, and an iPhone home-screen app, refuse `new Notification()`
+ * outright: a page there may only notify through its service worker. The old
+ * code tried the constructor alone, swallowed the error, and had already marked
+ * the day as notified, so the installed app never showed a single alert.
+ */
+async function showNotification(title, options) {
+  try {
+    const registration = await navigator.serviceWorker?.getRegistration();
+    if (registration) {
+      await registration.showNotification(title, options);
+      return true;
+    }
+  } catch (error) {
+    console.error('Service worker notification failed:', error);
+  }
+  try {
+    new Notification(title, options);
+    return true;
+  } catch {
+    return false;
+  }
 }

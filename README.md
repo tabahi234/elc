@@ -437,9 +437,10 @@ sentence.
 - An unknown address gets a real **404** listing the five screens that exist.
   It used to redirect silently to the dashboard, which looks exactly like the
   app ignoring the tap.
-- `OfflineBar` indicates lost connectivity. The app shell is cached, but private
-  records use memory only. Reloading requires a connection to read your role,
-  and pending writes can be lost when closing or reloading offline.
+- `OfflineBar` indicates lost connectivity. The service worker precaches the
+  app shell, fonts and icons, and Firestore keeps records in IndexedDB, so the
+  app opens and shows the last synced data with no signal. Writes made offline
+  are queued on the device and sync on reconnect.
 
 ## Icons
 
@@ -460,9 +461,10 @@ plate would lose its corners.
 
 ## Staying signed in
 
-Firestore uses `memoryLocalCache()` and the previous version's IndexedDB cache
-is cleared at startup, so no private record is ever written to the device. Auth
-uses `browserLocalPersistence`, so the token is.
+Firestore uses `persistentLocalCache()` so the app opens instantly and works
+offline; `signOut` calls `wipeLocalData()` (terminate + `clearIndexedDbPersistence`)
+so a shared device keeps nothing after sign-out. Auth uses
+`browserLocalPersistence`, so the token is kept too.
 
 Those are two different questions and the old code answered them with one
 setting. `browserSessionPersistence` ended the session with the browser tab,

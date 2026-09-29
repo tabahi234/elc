@@ -32,7 +32,9 @@ function beep() {
 
 export default function Focus() {
   const { subjects } = useClassData();
-  const [log, setLog] = useStudyLog();
+  // Loaded flag: the daily caps are checked against the log, so a quick-log
+  // tap before it has arrived would be measured against an empty day.
+  const [log, setLog, logLoaded] = useStudyLog();
   const [book] = useGradeBook();
   const toast = useToast();
 
@@ -49,10 +51,15 @@ export default function Focus() {
   const latest = useRef({ subject, log });
   latest.current = { subject, log };
 
-  // If the class list loads after this page, adopt the first real subject.
+  // If the class list loads after this page, adopt the first real subject. The
+  // same goes for a subject that has since gone: the bundled list is swapped
+  // for the published one on first load, and a CR can remove a course. Without
+  // this the picker shows one subject while minutes are logged against a code
+  // that no longer exists. Never mid-session, which is locked to its subject.
   useEffect(() => {
-    if (!subject && codes.length) setSubject(codes[0]);
-  }, [codes, subject]);
+    if (running) return;
+    if (codes.length && !codes.includes(subject)) setSubject(codes[0]);
+  }, [codes, subject, running]);
 
   /**
    * Take a session back out of the log.
@@ -229,11 +236,11 @@ export default function Focus() {
         <div className="card">
           <div className="row-wrap">
             {QUICK_LOG.map((mins) => (
-              <button key={mins} className="btn btn-sm btn-secondary" onClick={() => logSession(mins)} disabled={!subject}>
+              <button key={mins} className="btn btn-sm btn-secondary" onClick={() => logSession(mins)} disabled={!subject || !logLoaded}>
                 +{mins} min
               </button>
             ))}
-            <button className="btn btn-sm btn-ghost" onClick={() => setManualOpen(true)} disabled={!subject}>
+            <button className="btn btn-sm btn-ghost" onClick={() => setManualOpen(true)} disabled={!subject || !logLoaded}>
               <Plus size={14} aria-hidden="true" /> Custom
             </button>
           </div>

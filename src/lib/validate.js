@@ -125,7 +125,21 @@ export const toMinutes = (hhmm) => {
 };
 
 const isFiniteNumber = (v) => v !== '' && v != null && Number.isFinite(Number(v));
-const dayKey = (iso) => String(iso).slice(0, 10);
+
+/**
+ * The calendar day, on this phone's clock, that a timestamp falls on.
+ *
+ * Study sessions are stored with toISOString(), which is UTC. Slicing the
+ * first ten characters off that gives the UTC date, so in Pakistan (UTC+5)
+ * anything logged between midnight and 5 am landed on the previous day: it
+ * missed "today", broke the streak, and escaped the daily caps.
+ */
+export function localDay(value) {
+  const s = String(value ?? '');
+  if (ISO_DATE.test(s)) return s;
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? s.slice(0, 10) : format(d, 'yyyy-MM-dd');
+}
 
 /** Whole days from today to `iso`. Negative = in the past. */
 export function daysFromToday(iso) {
@@ -244,11 +258,11 @@ export function vStudySession(log, { subject, minutes, at }) {
   if (when.getTime() > Date.now() + 60_000) return { error: 'You cannot log study time in the future.' };
 
   // Totals for the same calendar day, including the new entry.
-  const key = dayKey(at);
+  const key = localDay(at);
   let sameSubject = mins;
   let sameDay = mins;
   for (const s of log) {
-    if (dayKey(s.at) !== key) continue;
+    if (localDay(s.at) !== key) continue;
     const m = Number(s.minutes) || 0;
     sameDay += m;
     if (s.subject === subject) sameSubject += m;

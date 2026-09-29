@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { onAuthStateChanged, signInWithPopup, signOut as fbSignOut } from 'firebase/auth';
 import { doc, onSnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
-import { auth, db, googleProvider } from '../firebase';
+import { auth, db, googleProvider, wipeLocalData } from '../firebase';
 import { AuthContext } from './authContext';
 
 const POPUP_TIMEOUT_MS = 90_000;
@@ -51,7 +51,17 @@ export function AuthProvider({ children }) {
       doc(db, 'roles', user.uid),
       { includeMetadataChanges: true },
       (snap) => {
-        if (!active || snap.metadata.fromCache) return;
+        if (!active) return;
+
+        // A cached role is good enough to open the app on: it is what the
+        // server said last time, and the listener corrects it the moment the
+        // server answers (a block still lands as soon as there is signal). A
+        // cached *absence* proves nothing, so wait for the server, unless there
+        // is no network to wait for.
+        if (snap.metadata.fromCache && !snap.exists()) {
+          if (!navigator.onLine) setRoleState({ uid: user.uid, role: null });
+          return;
+        }
 
         if (!snap.exists()) {
           // First time on this account. Stay in the loading state rather than
@@ -111,7 +121,9 @@ export function AuthProvider({ children }) {
 
   const signOut = async () => {
     await fbSignOut(auth);
-    // Dispose all in-memory Firestore data and pending UI state.
+    // Delete the on-device cache so the next person on a shared phone sees
+    // nothing, then reload to drop everything still held in memory.
+    try { await wipeLocalData(); } catch (err) { console.error('Cache wipe failed:', err); }
     window.location.reload();
   };
 

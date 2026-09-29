@@ -80,8 +80,10 @@ origin. Live Firebase settings and deployed rules were not inspected or changed.
 - Per-user nested study/grade data is not fully schema-validated. Timetable
   overlaps and duplicate changes are client integrity checks for trusted
   managers. There is no backend rate limiting or per-user storage quota here.
-- Initial approval checks require the network. Only the static shell persists
-  offline; unsynced memory writes can be lost on reload/close/sign-out.
+- Since 29 September 2026 records are cached on the device (Firestore
+  `persistentLocalCache`) so the PWA opens instantly and offline. A cached role
+  is trusted until the server answers; a block takes effect on next contact.
+  Sign-out deletes the IndexedDB cache. `CONSENT_VERSION` is 5 for this change.
 - This review and regression suite reduce identified risks; they are not proof
   that the app or the uninspected production environment has no vulnerabilities.
 

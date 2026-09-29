@@ -337,8 +337,11 @@ a.card:active, button.card:active { transform: translateY(1px); }
 /* Placeholder passes AA against the input fill, unlike a default grey. */
 ::placeholder { color: var(--text-muted); opacity: 1; }
 
-/* 16px stops iOS Safari zooming the viewport when a field takes focus. */
-@media (max-width: 480px) {
+/* 16px stops iOS Safari zooming the viewport when a field takes focus. Keyed
+   on touch as well as width: a phone in landscape is 660-930px wide, and with
+   the width test alone every field still zoomed the page in and left it
+   zoomed. */
+@media (max-width: 480px), (pointer: coarse) {
   .input, input:not([type='checkbox']):not([type='radio']), select, textarea { font-size: 16px; }
 }
 textarea { min-height: 84px; padding-top: var(--s3); resize: vertical; line-height: 1.45; }
@@ -764,11 +767,23 @@ svg[class*='lucide'] { stroke-width: 1.75; }
   position: fixed; inset: 0;
   z-index: 150;
   background: var(--bg);
-  display: flex; align-items: center; justify-content: center;
-  padding: var(--s4);
+  display: flex; justify-content: center;
+  /* Scrolls when a step is taller than the screen (a phone in landscape, a
+     small iPhone, or larger system text). Without this the Next and Skip
+     buttons were cut off below the fold with no way to reach them, and the
+     tour could not be finished. Centring is done with auto margins on the
+     card, because align-items: center clips the top of overflowing content. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding:
+    max(var(--s4), env(safe-area-inset-top))
+    max(var(--s4), env(safe-area-inset-right))
+    max(var(--s4), env(safe-area-inset-bottom))
+    max(var(--s4), env(safe-area-inset-left));
   animation: fade 0.2s var(--ease);
 }
 .tour {
+  margin: auto 0;
   width: 100%; max-width: 420px;
   display: flex; flex-direction: column;
   gap: var(--s5);
@@ -797,11 +812,17 @@ svg[class*='lucide'] { stroke-width: 1.75; }
 
 /* ---- install prompt -------------------------------------------------------- */
 .install-card {
+  /* Centred with insets and auto margins, not translateX(-50%): the
+     .animate-in entrance ends on `transform: none`, which wiped the centring
+     transform and pushed half the card off the right edge on iPhone. */
   position: fixed;
-  left: 50%; transform: translateX(-50%);
+  left: max(var(--s3), env(safe-area-inset-left));
+  right: max(var(--s3), env(safe-area-inset-right));
+  margin-inline: auto;
   bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + var(--s3));
   z-index: 90;
-  width: min(560px, calc(100vw - var(--s6)));
+  max-width: 560px;
+  box-sizing: border-box;
   display: flex; align-items: flex-start; gap: var(--s3);
   padding: var(--s3) var(--s4);
   border-radius: var(--r-card);
@@ -980,7 +1001,7 @@ svg[class*='lucide'] { stroke-width: 1.75; }
 
 /* Anything that hangs off the bottom has to clear the navigation bar AND the
    home indicator, or it sits half under both. */
-.toast-stack, .install-card {
+.toast-stack {
   width: min(560px, calc(100vw - var(--s5)));
   max-width: calc(100vw - var(--s5));
 }

@@ -85,13 +85,11 @@ export default function Tasks() {
 
   const save = async (data) => {
     try {
-      if (editing?.id) {
-        await updateTask(editing.id, data);
-        toast.success('Task updated.');
-      } else {
-        await addTask(data);
-        toast.success('Task added.');
-      }
+      const { queued } = editing?.id
+        ? await updateTask(editing.id, data)
+        : await addTask(data);
+      if (queued) toast.info('Saved on this phone. It syncs by itself when you are back online.');
+      else toast.success(editing?.id ? 'Task updated.' : 'Task added.');
       setEditing(null);
     } catch (err) {
       toast.error(friendlyError(err));
@@ -189,7 +187,7 @@ export default function Tasks() {
             <div className="alert-body">
               <strong className="small">Your own tasks could not load</strong>
               <p className="small" style={{ marginTop: 2 }}>
-                {friendlyError(error, 'Pull down to reload in a moment.')} Class deadlines
+                {friendlyError(error, 'Close and reopen the app in a moment.')} Class deadlines
                 below are still up to date.
               </p>
             </div>

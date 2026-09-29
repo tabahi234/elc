@@ -7,6 +7,7 @@ import { useClassData } from './classDataContext';
 import { useUserDoc } from './storage';
 import { TASK_TYPES, daysFromToday, isEventType, eventIsOver } from './validate';
 import { timestampMillis } from './timestamps';
+import { settle } from './writes';
 
 export { TASK_TYPES };
 
@@ -38,7 +39,9 @@ export function useTasks() {
 
   const col = useCallback(() => collection(db, 'users', user.uid, 'tasks'), [user]);
 
-  const addTask = useCallback((data) => addDoc(col(), {
+  // Wrapped in settle() so a save made offline finishes instead of hanging on
+  // a server acknowledgement that will not come until the signal does.
+  const addTask = useCallback((data) => settle(addDoc(col(), {
     title: data.title,
     subject: data.subject,
     type: data.type,
@@ -49,12 +52,12 @@ export function useTasks() {
     createdAt: new Date().toISOString(),
     sourceTaskId: data.sourceTaskId || null,
     sourceSnapshot: data.sourceSnapshot || null,
-  }), [col]);
+  })), [col]);
 
   const updateTask = useCallback((id, data) =>
-    setDoc(doc(col(), id), data, { merge: true }), [col]);
+    settle(setDoc(doc(col(), id), data, { merge: true })), [col]);
 
-  const deleteTask = useCallback((id) => deleteDoc(doc(col(), id)), [col]);
+  const deleteTask = useCallback((id) => settle(deleteDoc(doc(col(), id))), [col]);
 
   return { tasks, loading, error, addTask, updateTask, deleteTask };
 }
@@ -130,7 +133,8 @@ export function useAllTasks() {
     // must not be able to write a meaningless completion flag.
     if (isEventType(task.type)) return;
     if (task.source === 'class') toggleGlobal(task.id, !task.completed);
-    else updateTask(task.id, { completed: !task.completed });
+    else updateTask(task.id, { completed: !task.completed })
+      .catch((err) => console.error('Toggle failed:', err));
   }, [toggleGlobal, updateTask]);
 
   /**

@@ -1,5 +1,6 @@
 import { startOfWeek, isAfter, format } from 'date-fns';
 import { useUserDoc } from './storage';
+import { localDay } from './validate';
 
 /**
  * The study log: [{ id, subject, minutes, at }] where `at` is an ISO timestamp.
@@ -34,7 +35,7 @@ export function removeEntry(log, entry) {
 export function entriesToday(log) {
   const today = format(new Date(), 'yyyy-MM-dd');
   return log
-    .filter((s) => String(s.at).slice(0, 10) === today)
+    .filter((s) => localDay(s.at) === today)
     .sort((a, b) => String(b.at).localeCompare(String(a.at)));
 }
 
@@ -57,7 +58,7 @@ export function todayMinutes(log) {
   const bySubject = {};
   let all = 0;
   for (const s of log) {
-    if (String(s.at).slice(0, 10) !== today) continue;
+    if (localDay(s.at) !== today) continue;
     const mins = Number(s.minutes) || 0;
     bySubject[s.subject] = (bySubject[s.subject] || 0) + mins;
     all += mins;
@@ -66,7 +67,7 @@ export function todayMinutes(log) {
 }
 
 export function streakDays(log) {
-  const days = new Set(log.map((s) => String(s.at).slice(0, 10)));
+  const days = new Set(log.map((s) => localDay(s.at)));
   let streak = 0;
   const d = new Date();
   // Today counts if studied; otherwise the streak is measured from yesterday,

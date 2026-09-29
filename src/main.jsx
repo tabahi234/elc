@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import '@fontsource-variable/geist';
 import './index.css';
 import App from './App.jsx';
-import { privacyReady } from './firebase';
+import { authReady } from './firebase';
 
 // Apply the saved theme before the first paint, so a light-mode user doesn't
 // get a flash of the dark background on every load.
@@ -14,11 +14,12 @@ try {
   }
 } catch { /* private mode: fall back to the system preference */ }
 
-privacyReady.then(() => createRoot(document.getElementById('root')).render(
+// Render straight away. Nothing here waits on the network: auth and Firestore
+// both answer from the device first and catch up with the server afterwards.
+authReady.catch((error) => console.error('Sign-in persistence setup failed:', error));
+
+createRoot(document.getElementById('root')).render(
   <StrictMode>
     <App />
   </StrictMode>
-)).catch((error) => {
-  console.error('Secure storage setup failed:', error);
-  document.getElementById('root').textContent = 'Close other UniHelper tabs, then reload to finish the privacy update.';
-});
+);

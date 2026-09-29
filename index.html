@@ -29,9 +29,23 @@
          inset. With this, iOS reserves the status bar and only the bottom home
          indicator needs allowing for. -->
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+
+    <!-- Painted before any JavaScript runs, so a cold start shows the app's
+         own background and a mark instead of a blank white screen. React
+         replaces the contents of #root on its first render. -->
+    <style>
+      html, body { margin: 0; background: #f7f8fa; }
+      .boot { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; }
+      .boot img { width: 64px; height: 64px; border-radius: 16px; animation: boot-pulse 1.2s ease-in-out infinite alternate; }
+      @keyframes boot-pulse { from { opacity: .55; } to { opacity: 1; } }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) body { background: #0b0f14; }
+      }
+      :root[data-theme="dark"] body { background: #0b0f14; }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div class="boot"><img src="/apple-touch-icon.png" alt="" /></div></div>
     <noscript>
       This app needs JavaScript. Turn it on in your browser settings, then reload.
     </noscript>

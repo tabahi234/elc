@@ -829,6 +829,9 @@ function AccountSheet({ open, onClose }) {
     setPermission(result);
     if (result === 'granted') toast.success('You will get one summary a day when something is due.');
     else if (result === 'denied') toast.warning('Blocked. Turn notifications back on in your browser site settings.');
+    // 'default' means the prompt was closed without an answer. Saying the
+    // browser cannot do notifications would be false.
+    else if (result === 'default') toast.info('Nothing was chosen. Tap again when you want alerts.');
     else toast.info('This browser does not support notifications.');
   };
 
